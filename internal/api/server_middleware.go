@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -10,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,6 +26,7 @@ var corsExposedResponseHeaders = []string{
 	"X-CPA-HOME-BUILD-DATE",
 	"X-SERVER-VERSION",
 	"X-SERVER-BUILD-DATE",
+	"Retry-After",
 }
 
 var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
@@ -137,6 +141,30 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func (s *Server) clientKeyRateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, exists := c.Get("userApiKey")
+		clientKey, ok := principal.(string)
+		if !exists || !ok {
+			c.Next()
+			return
+		}
+		allowed, retryAfter := s.clientKeyRateLimiter.Allow(clientKey)
+		if allowed {
+			c.Next()
+			return
+		}
+
+		seconds := int64(retryAfter / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		c.Header("Retry-After", strconv.FormatInt(seconds, 10))
+		c.Data(http.StatusTooManyRequests, "application/json; charset=utf-8", handlers.BuildErrorResponseBody(http.StatusTooManyRequests, "Client request rate limit exceeded. Please retry later."))
+		c.Abort()
 	}
 }
 

@@ -151,6 +151,14 @@ type CodexLiveICEServer struct {
 	Credential string   `yaml:"credential" json:"-"`
 }
 
+// ClientKeyRateLimitConfig controls the opt-in per-client-key ingress limiter.
+type ClientKeyRateLimitConfig struct {
+	Enabled           bool    `yaml:"enabled" json:"enabled"`
+	RequestsPerMinute float64 `yaml:"requests-per-minute" json:"requests-per-minute"`
+	Burst             int     `yaml:"burst" json:"burst"`
+	MaxTrackedKeys    int     `yaml:"max-tracked-keys" json:"max-tracked-keys"`
+}
+
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.

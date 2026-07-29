@@ -3,10 +3,38 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// Validate checks whether the client-key ingress rate limiter is safe to activate.
+func (cfg ClientKeyRateLimitConfig) Validate() error {
+	if math.IsNaN(cfg.RequestsPerMinute) || math.IsInf(cfg.RequestsPerMinute, 0) {
+		return fmt.Errorf("client-key-rate-limit.requests-per-minute must be finite")
+	}
+	if cfg.RequestsPerMinute < 0 {
+		return fmt.Errorf("client-key-rate-limit.requests-per-minute must not be negative")
+	}
+	if cfg.Burst < 0 {
+		return fmt.Errorf("client-key-rate-limit.burst must not be negative")
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.RequestsPerMinute == 0 {
+		return fmt.Errorf("client-key-rate-limit.requests-per-minute must be greater than zero when enabled")
+	}
+	if cfg.Burst == 0 {
+		return fmt.Errorf("client-key-rate-limit.burst must be greater than zero when enabled")
+	}
+	if cfg.MaxTrackedKeys <= 0 {
+		return fmt.Errorf("client-key-rate-limit.max-tracked-keys must be greater than zero when enabled")
+	}
+	return nil
+}
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
 func (cfg *Config) SanitizePayloadRules() {

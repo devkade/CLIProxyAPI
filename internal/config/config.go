@@ -16,6 +16,9 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
+	// ClientKeyRateLimit controls the disabled-by-default per-client-key ingress limiter.
+	ClientKeyRateLimit ClientKeyRateLimitConfig `yaml:"client-key-rate-limit" json:"client-key-rate-limit"`
+
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 

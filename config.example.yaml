@@ -41,6 +41,14 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional per-client API key ingress rate limiting. Disabled by default.
+# Limits are independent for each successfully authenticated downstream API key.
+client-key-rate-limit:
+  enabled: false
+  requests-per-minute: 60
+  burst: 10
+  max-tracked-keys: 10000
+
 # Enable debug logging
 debug: false
 
