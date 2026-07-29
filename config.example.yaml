@@ -426,6 +426,24 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# Direct Ollama Cloud (distinct from a host-local Ollama server).
+# The base URL defaults to the official https://ollama.com/v1 endpoint.
+# See docs/ollama-cloud.md for model capability and Docker routing guidance.
+# ollama-cloud-api-key:
+#   - api-key: "your-ollama-api-key"
+#     weight: 1 # optional: weighted-round-robin share; omitted defaults to 1
+#     prefix: "cloud" # optional: request cloud/gpt-oss:120b
+#     # base-url: "https://ollama.com/v1" # optional; official default
+#     # proxy-url: "socks5://proxy.example.com:1080" # optional
+#     models: # explicit credential-scoped cloud catalog
+#       - name: "gpt-oss:120b"
+#         alias: "gpt-oss:120b"
+#         input-modalities: [text]
+#       - name: "qwen3-vl:235b"
+#         alias: "ollama-cloud-vision"
+#         input-modalities: [text, image]
+#         output-modalities: [text]
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.

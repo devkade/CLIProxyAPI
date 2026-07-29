@@ -141,6 +141,10 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "ollama-cloud":
+		if entry := s.resolveConfigOllamaCloudKey(a); entry != nil {
+			models = buildOllamaCloudConfigModels(entry)
+		}
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
@@ -338,6 +342,28 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 		return nil, false
 	}
 	return auth, true
+}
+
+func (s *Service) resolveConfigOllamaCloudKey(auth *coreauth.Auth) *config.OllamaCloudKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.OllamaCloudKey {
+		entry := &s.cfg.OllamaCloudKey[i]
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			baseURL = config.DefaultOllamaCloudBaseURL
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) && strings.EqualFold(baseURL, attrBase) {
+			return entry
+		}
+	}
+	return nil
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
@@ -658,6 +684,26 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		DisplayName: displayName,
 		UserDefined: userDefined,
 	}
+}
+
+func buildOllamaCloudConfigModels(entry *config.OllamaCloudKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		info := buildConfiguredModelInfo(model, "ollama", "ollama-cloud", now, strings.TrimSpace(model.Alias), true)
+		if info == nil {
+			continue
+		}
+		info.Thinking = model.Thinking
+		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
+		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		models = append(models, info)
+	}
+	return models
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {

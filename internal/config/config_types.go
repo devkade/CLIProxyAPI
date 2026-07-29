@@ -600,3 +600,24 @@ func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
 func (m OpenAICompatibilityModel) GetDisplayName() string { return m.DisplayName }
 
 func (m OpenAICompatibilityModel) GetForceMapping() bool { return m.ForceMapping }
+
+const DefaultOllamaCloudBaseURL = "https://ollama.com/v1"
+
+// OllamaCloudKey configures one Ollama Cloud API-key credential.
+type OllamaCloudKey struct {
+	APIKey         string             `yaml:"api-key" json:"api-key"`
+	Priority       int                `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Weight         *int               `yaml:"weight,omitempty" json:"weight,omitempty"`
+	Prefix         string             `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	BaseURL        string             `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	ProxyURL       string             `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	Models         []OllamaCloudModel `yaml:"models" json:"models"`
+	Headers        map[string]string  `yaml:"headers,omitempty" json:"headers,omitempty"`
+	DisableCooling bool               `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+func (k OllamaCloudKey) GetAPIKey() string  { return k.APIKey }
+func (k OllamaCloudKey) GetBaseURL() string { return k.BaseURL }
+
+// OllamaCloudModel describes an Ollama Cloud model and optional client alias.
+type OllamaCloudModel = OpenAICompatibilityModel

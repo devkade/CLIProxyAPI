@@ -30,6 +30,10 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type OllamaCloudKey = internalconfig.OllamaCloudKey
+type OllamaCloudModel = internalconfig.OllamaCloudModel
+
+const DefaultOllamaCloudBaseURL = internalconfig.DefaultOllamaCloudBaseURL
 
 type TLS = internalconfig.TLSConfig
 

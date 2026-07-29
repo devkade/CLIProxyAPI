@@ -52,6 +52,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// Ollama Cloud
+	out = append(out, s.synthesizeOllamaCloud(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -250,6 +252,52 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			a.Metadata = nil
 		}
 		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeOllamaCloud creates auth entries for direct Ollama Cloud access.
+func (s *ConfigSynthesizer) synthesizeOllamaCloud(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	out := make([]*coreauth.Auth, 0, len(cfg.OllamaCloudKey))
+	for i := range cfg.OllamaCloudKey {
+		entry := &cfg.OllamaCloudKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			baseURL = config.DefaultOllamaCloudBaseURL
+		}
+		id, token := ctx.IDGenerator.Next("ollama-cloud:apikey", key, baseURL)
+		attrs := map[string]string{
+			"source":   fmt.Sprintf("config:ollama-cloud[%s]", token),
+			"api_key":  key,
+			"base_url": baseURL,
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if hash := diff.ComputeOpenAICompatModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		metadata := map[string]any{}
+		if entry.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		auth := &coreauth.Auth{
+			ID: id, Provider: "ollama-cloud", Label: "ollama-cloud-apikey",
+			Prefix: strings.TrimSpace(entry.Prefix), Status: coreauth.StatusActive,
+			ProxyURL: strings.TrimSpace(entry.ProxyURL), Attributes: attrs,
+			Metadata: metadata, CreatedAt: ctx.Now, UpdatedAt: ctx.Now,
+		}
+		if len(metadata) == 0 {
+			auth.Metadata = nil
+		}
+		out = append(out, auth)
 	}
 	return out
 }
