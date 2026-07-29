@@ -187,6 +187,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
 	didRefreshOnUnauthorized := false
+	fallbacks := newClassifiedModelFallbackTracker()
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
@@ -229,6 +230,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			retryFallback, terminalErr := fallbacks.evaluate(auth, provider, execModel, execModels[idx+1:], errStream)
+			if terminalErr != nil {
+				return nil, terminalErr
+			}
+			if retryFallback {
+				continue
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -262,28 +270,25 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
-			if isRequestInvalidError(bootstrapErr) {
-				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
-				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
-			}
-			if idx < len(execModels)-1 {
-				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
-				discardStreamChunks(streamResult.Chunks)
-				lastErr = bootstrapErr
-				continue
-			}
 			rerr := resultErrorFromError(bootstrapErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			discardStreamChunks(streamResult.Chunks)
+			retryFallback, terminalErr := fallbacks.evaluate(auth, provider, execModel, execModels[idx+1:], bootstrapErr)
+			if terminalErr != nil {
+				return nil, terminalErr
+			}
+			if retryFallback {
+				continue
+			}
+			if isRequestInvalidError(bootstrapErr) {
+				return nil, bootstrapErr
+			}
+			if idx < len(execModels)-1 {
+				lastErr = bootstrapErr
+				continue
+			}
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 

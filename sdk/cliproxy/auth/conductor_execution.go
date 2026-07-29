@@ -317,7 +317,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		var authErr error
 		didRefreshOnUnauthorized := false
-		for _, upstreamModel := range models {
+		fallbacks := newClassifiedModelFallbackTracker()
+		for modelIndex, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -353,6 +354,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				retryFallback, terminalErr := fallbacks.evaluate(auth, provider, upstreamModel, models[modelIndex+1:], errExec)
+				if terminalErr != nil {
+					return cliproxyexecutor.Response{}, terminalErr
+				}
+				if retryFallback {
+					continue
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -434,7 +442,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		var authErr error
 		didRefreshOnUnauthorized := false
-		for _, upstreamModel := range models {
+		fallbacks := newClassifiedModelFallbackTracker()
+		for modelIndex, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -477,6 +486,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
+				}
+				retryFallback, terminalErr := fallbacks.evaluate(auth, provider, upstreamModel, models[modelIndex+1:], errExec)
+				if terminalErr != nil {
+					return cliproxyexecutor.Response{}, terminalErr
+				}
+				if retryFallback {
+					continue
 				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec

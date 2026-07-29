@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -346,6 +347,112 @@ func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolStopsOnGenericBadRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	badRequestErr := &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"message":"bad request"}}`}
+	executor := &openAICompatPoolExecutor{
+		id:            openAICompatPoolProviderKey,
+		executeErrors: map[string]error{"deepseek-v3.1": badRequestErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v3.1", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != badRequestErr {
+		t.Fatalf("execute error = %v, want original generic 400", err)
+	}
+	if got := executor.ExecuteModels(); len(got) != 1 || got[0] != "deepseek-v3.1" {
+		t.Fatalf("execute calls = %v, want only first model", got)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolStopsOnAuthenticationAndAuthorizationBadRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "authentication", message: `{"error":{"code":"invalid_api_key","message":"The requested model is not supported for this key"}}`},
+		{name: "authorization", message: `{"error":{"code":"permission_denied","message":"This model is not supported for this account"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			alias := "claude-opus-4.66"
+			authErr := &Error{HTTPStatus: http.StatusBadRequest, Message: tt.message}
+			executor := &openAICompatPoolExecutor{
+				id:            openAICompatPoolProviderKey,
+				executeErrors: map[string]error{"deepseek-v3.1": authErr},
+			}
+			m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			}, executor)
+
+			_, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+			if err != authErr {
+				t.Fatalf("execute error = %v, want authentication/authorization error", err)
+			}
+			if got := executor.ExecuteModels(); len(got) != 1 || got[0] != "deepseek-v3.1" {
+				t.Fatalf("execute calls = %v, want only first model", got)
+			}
+		})
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolClassifiedFallbackIsBoundedAndPreservesOriginalError(t *testing.T) {
+	alias := "claude-opus-4.66"
+	originalErr := &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"model_not_supported","message":"model is not supported"}}`}
+	executor := &openAICompatPoolExecutor{
+		id: openAICompatPoolProviderKey,
+		executeErrors: map[string]error{
+			"model-a": originalErr,
+			"model-b": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"unsupported_model"}}`},
+			"model-c": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"model_not_found"}}`},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "model-a", Alias: alias},
+		{Name: "model-b", Alias: alias},
+		{Name: "model-c", Alias: alias},
+		{Name: "model-d", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != originalErr {
+		t.Fatalf("execute error = %v, want original error %v", err, originalErr)
+	}
+	want := []string{"model-a", "model-b", "model-c"}
+	if got := executor.ExecuteModels(); !slices.Equal(got, want) {
+		t.Fatalf("execute calls = %v, want bounded calls %v", got, want)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolFallsBackWhenToolsUnsupported(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{
+		id: openAICompatPoolProviderKey,
+		executeErrors: map[string]error{
+			"deepseek-v3.1": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"unsupported_feature","message":"This model does not support tools"}}`},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v3.1", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{
+		Model:   alias,
+		Payload: []byte(`{"tools":[{"type":"function","function":{"name":"lookup"}}]}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want tool-capable fallback", err)
+	}
+	if string(resp.Payload) != "glm-5" {
+		t.Fatalf("payload = %q, want glm-5", resp.Payload)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportBadRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	modelSupportErr := &Error{
@@ -523,6 +630,31 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolFallsBackBeforeFirstByte(t *t
 	}
 	if gotHeader := streamResult.Headers.Get("X-Model"); gotHeader != "glm-5" {
 		t.Fatalf("header X-Model = %q, want %q", gotHeader, "glm-5")
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompatAliasPoolFallsBackOnClassifiedBadRequestBeforeFirstByte(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{
+		id: openAICompatPoolProviderKey,
+		streamFirstErrors: map[string]error{
+			"deepseek-v3.1": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"model_not_supported","message":"model is not supported"}}`},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v3.1", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	if payload := readOpenAICompatStreamPayload(t, streamResult); payload != "glm-5" {
+		t.Fatalf("stream payload = %q, want glm-5", payload)
+	}
+	if got := streamResult.Headers.Get("X-Model"); got != "glm-5" {
+		t.Fatalf("header X-Model = %q, want glm-5", got)
 	}
 }
 
