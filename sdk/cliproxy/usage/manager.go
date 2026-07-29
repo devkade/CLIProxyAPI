@@ -39,6 +39,11 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// Protocol is the bounded downstream request schema (for example, openai or claude).
+	Protocol string
+	// Retry and Fallback describe this upstream attempt within the shared request lifecycle.
+	Retry    bool
+	Fallback bool
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
@@ -76,6 +81,49 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type healthRequestContextKey struct{}
+
+type healthRequestContext struct {
+	mu            sync.Mutex
+	protocol      string
+	attempts      uint64
+	firstProvider string
+}
+
+// WithHealthRequest starts shared per-request health tracking. Repeated calls
+// preserve the existing tracker so retries across outer execution loops remain linked.
+func WithHealthRequest(ctx context.Context, protocol string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if existing, _ := ctx.Value(healthRequestContextKey{}).(*healthRequestContext); existing != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, healthRequestContextKey{}, &healthRequestContext{protocol: strings.TrimSpace(protocol)})
+}
+
+// ObserveHealthAttempt returns sanitized dimensions for the next upstream attempt.
+// It stores no credential, prompt, response, or error content.
+func ObserveHealthAttempt(ctx context.Context, provider string) (protocol string, retry, fallback bool) {
+	if ctx == nil {
+		return "", false, false
+	}
+	request, _ := ctx.Value(healthRequestContextKey{}).(*healthRequestContext)
+	if request == nil {
+		return "", false, false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	request.mu.Lock()
+	protocol = request.protocol
+	retry = request.attempts > 0
+	fallback = request.firstProvider != "" && provider != "" && provider != request.firstProvider
+	if request.firstProvider == "" {
+		request.firstProvider = provider
+	}
+	request.attempts++
+	request.mu.Unlock()
+	return protocol, retry, fallback
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {

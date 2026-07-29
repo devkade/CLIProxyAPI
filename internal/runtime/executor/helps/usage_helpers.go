@@ -33,6 +33,9 @@ type UsageReporter struct {
 	source       string
 	reasoning    string
 	serviceTier  string
+	protocol     string
+	retry        bool
+	fallback     bool
 	generate     bool
 	requestedAt  time.Time
 	ttftMu       sync.RWMutex
@@ -62,6 +65,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	protocol, retry, fallback := usage.ObserveHealthAttempt(ctx, provider)
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
@@ -72,6 +76,9 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		authType:    resolveUsageAuthType(auth),
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
+		protocol:    protocol,
+		retry:       retry,
+		fallback:    fallback,
 		generate:    usage.GenerateFromContext(ctx),
 	}
 	if auth != nil {
@@ -268,6 +275,9 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+		Protocol:            r.protocol,
+		Retry:               r.retry,
+		Fallback:            r.fallback,
 		Generate:            usage.GenerateFlag(r.generate),
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),

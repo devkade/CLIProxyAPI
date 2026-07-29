@@ -1,13 +1,17 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
@@ -64,6 +68,50 @@ func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
 			t.Fatalf("remaining queue = %q, want original item", remaining)
 		}
 	})
+}
+
+func TestGetHealthMetricsIncludesBoundedRedactedAccountCooldowns(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	_, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "oauth-token-secret", Provider: "claude", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "must-not-leak", "email": "private@example.com"},
+	})
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	retryAfter := time.Hour
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID: "oauth-token-secret", Provider: "claude", Model: "claude-sonnet", Success: false,
+		RetryAfter: &retryAfter, Error: &coreauth.Error{Code: "rate_limit", Message: "upstream secret body", HTTPStatus: http.StatusTooManyRequests},
+	})
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/health-metrics", nil)
+	(&Handler{authManager: manager}).GetHealthMetrics(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, secret := range []string{"oauth-token-secret", "must-not-leak", "private@example.com", "upstream secret body"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("response leaked %q: %s", secret, body)
+		}
+	}
+	var payload struct {
+		Accounts []struct {
+			Provider       string `json:"provider"`
+			Cooldown       int    `json:"cooldown"`
+			ModelCooldowns int    `json:"model_cooldowns"`
+		} `json:"accounts"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if len(payload.Accounts) != 1 || payload.Accounts[0].Provider != "claude" || payload.Accounts[0].Cooldown != 1 || payload.Accounts[0].ModelCooldowns != 1 {
+		t.Fatalf("accounts = %#v, want one claude cooldown", payload.Accounts)
+	}
 }
 
 func withManagementUsageQueue(t *testing.T, fn func()) {
