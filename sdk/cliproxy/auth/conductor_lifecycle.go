@@ -64,6 +64,18 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	m.mu.Unlock()
 }
 
+type accountReloadContextKey struct{}
+
+// WithAccountReload marks an Update as a token/account reload that should reset cooldown state.
+func WithAccountReload(ctx context.Context) context.Context {
+	return context.WithValue(ctx, accountReloadContextKey{}, true)
+}
+
+func isAccountReload(ctx context.Context) bool {
+	reload, _ := ctx.Value(accountReloadContextKey{}).(bool)
+	return reload
+}
+
 // Register inserts a new auth entry into the manager.
 func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
@@ -75,7 +87,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
-	now := time.Now()
+	now := m.clock.Now()
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		clearedCooldown = clearCooldownStateForAuth(auth, now)
@@ -121,14 +133,15 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
-	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+	reloading := isAccountReload(ctx)
+	if !reloading && !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
 	}
-	now := time.Now()
+	now := m.clock.Now()
 	clearedCooldown := false
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	if reloading || m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		clearedCooldown = clearCooldownStateForAuth(auth, now)
 	}
 	auth.EnsureIndex()

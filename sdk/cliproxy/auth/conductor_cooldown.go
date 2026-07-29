@@ -21,6 +21,8 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+var maxCooldownSeconds atomic.Int64
+
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -30,6 +32,30 @@ func SetQuotaCooldownDisabled(disable bool) {
 // 0 keeps the legacy default; negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
+}
+
+// SetMaxCooldownSeconds caps provider-requested and generated cooldowns.
+// Values <= 0 restore the default cap.
+func SetMaxCooldownSeconds(seconds int) {
+	maxCooldownSeconds.Store(int64(seconds))
+}
+
+func maxCooldownDuration() time.Duration {
+	seconds := maxCooldownSeconds.Load()
+	if seconds <= 0 {
+		return defaultMaxCooldown
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func boundedCooldownDeadline(now time.Time, cooldown time.Duration) time.Time {
+	if cooldown <= 0 {
+		return now
+	}
+	if maximum := maxCooldownDuration(); cooldown > maximum {
+		cooldown = maximum
+	}
+	return now.Add(cooldown)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -81,9 +107,9 @@ func nextTransientErrorRetryAfter(now time.Time) time.Time {
 		return time.Time{}
 	}
 	if seconds == 0 {
-		return now.Add(transientErrorCooldown)
+		return boundedCooldownDeadline(now, transientErrorCooldown)
 	}
-	return now.Add(time.Duration(seconds) * time.Second)
+	return boundedCooldownDeadline(now, time.Duration(seconds)*time.Second)
 }
 
 func recoverableFailureRetryAfter(now time.Time, disableCooling bool) time.Time {
@@ -704,7 +730,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
-		now := time.Now()
+		now := m.clock.Now()
+		wasCooling, _, _ := isAuthBlockedForModel(auth, result.Model, now)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -750,7 +777,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
-						next := now.Add(12 * time.Hour)
+						next := boundedCooldownDeadline(now, 12*time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
@@ -771,7 +798,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
 						} else {
-							state.NextRetryAfter = now.Add(30 * time.Minute)
+							state.NextRetryAfter = boundedCooldownDeadline(now, 30*time.Minute)
 							suspendReason = "invalid_grant"
 							shouldSuspendModel = true
 						}
@@ -781,7 +808,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(30 * time.Minute)
+								next := boundedCooldownDeadline(now, 30*time.Minute)
 								state.NextRetryAfter = next
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
@@ -790,7 +817,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(30 * time.Minute)
+								next := boundedCooldownDeadline(now, 30*time.Minute)
 								state.NextRetryAfter = next
 								suspendReason = "payment_required"
 								shouldSuspendModel = true
@@ -799,7 +826,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(12 * time.Hour)
+								next := boundedCooldownDeadline(now, 12*time.Hour)
 								state.NextRetryAfter = next
 								suspendReason = "not_found"
 								shouldSuspendModel = true
@@ -809,7 +836,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
 								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
+									next = boundedCooldownDeadline(now, *result.RetryAfter)
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
@@ -849,6 +876,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		isCooling, _, cooldownUntil := isAuthBlockedForModel(auth, result.Model, now)
+		if !wasCooling && isCooling {
+			logEntryWithRequestID(ctx).
+				WithField("auth_id", auth.ID).
+				WithField("provider", auth.Provider).
+				WithField("model", result.Model).
+				WithField("cooldown_until", cooldownUntil).
+				Info("account cooldown started")
+		} else if wasCooling && !isCooling {
+			logEntryWithRequestID(ctx).
+				WithField("auth_id", auth.ID).
+				WithField("provider", auth.Provider).
+				WithField("model", result.Model).
+				Info("account cooldown recovered")
+		}
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 		if trackCooldownState {
@@ -1309,7 +1351,7 @@ func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time
 			cooldown = 10 * time.Second
 		}
 		if cooldown > 0 {
-			next = now.Add(cooldown)
+			next = boundedCooldownDeadline(now, cooldown)
 		}
 		backoffLevel = nextLevel
 	}
@@ -1613,7 +1655,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+			auth.NextRetryAfter = boundedCooldownDeadline(now, 30*time.Minute)
 		}
 		return
 	}
@@ -1623,21 +1665,21 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+			auth.NextRetryAfter = boundedCooldownDeadline(now, 30*time.Minute)
 		}
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+			auth.NextRetryAfter = boundedCooldownDeadline(now, 30*time.Minute)
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(12 * time.Hour)
+			auth.NextRetryAfter = boundedCooldownDeadline(now, 12*time.Hour)
 		}
 	case 429:
 		auth.StatusMessage = "quota exhausted"
@@ -1646,7 +1688,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		var next time.Time
 		if !disableCooling {
 			if retryAfter != nil {
-				next = now.Add(*retryAfter)
+				next = boundedCooldownDeadline(now, *retryAfter)
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
@@ -1695,8 +1737,9 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 	if cooldown < quotaBackoffBase {
 		cooldown = quotaBackoffBase
 	}
-	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
+	maximum := min(maxCooldownDuration(), quotaBackoffMax)
+	if cooldown >= maximum {
+		return maximum, prevLevel
 	}
 	return cooldown, prevLevel + 1
 }

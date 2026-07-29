@@ -32,6 +32,7 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	defaultMaxCooldown        = 12 * time.Hour
 	transientErrorCooldown    = time.Minute
 )
 

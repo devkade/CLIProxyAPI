@@ -286,12 +286,9 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-				auth.ModelStates = existing.ModelStates
-			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		_, err = s.coreManager.Update(coreauth.WithAccountReload(ctx), auth)
 	} else {
 		_, err = s.coreManager.Register(ctx, auth)
 	}
@@ -361,6 +358,7 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	coreauth.SetMaxCooldownSeconds(cfg.MaxCooldownSeconds)
 }
 
 func (s *Service) configureCooldownStateStore(cfg *config.Config) {

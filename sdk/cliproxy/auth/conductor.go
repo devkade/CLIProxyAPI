@@ -63,6 +63,15 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// Clock supplies time for cooldown state transitions and account selection.
+type Clock interface {
+	Now() time.Time
+}
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
 type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
@@ -108,6 +117,7 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
 	hook                      Hook
+	clock                     Clock
 	mu                        sync.RWMutex
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
@@ -161,17 +171,26 @@ type Manager struct {
 
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
+	return NewManagerWithClock(store, selector, hook, systemClock{})
+}
+
+// NewManagerWithClock constructs a manager with an injectable cooldown clock.
+func NewManagerWithClock(store Store, selector Selector, hook Hook, clock Clock) *Manager {
 	if selector == nil {
 		selector = &RoundRobinSelector{}
 	}
 	if hook == nil {
 		hook = NoopHook{}
 	}
+	if clock == nil {
+		clock = systemClock{}
+	}
 	manager := &Manager{
 		store:                 store,
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
 		hook:                  hook,
+		clock:                 clock,
 		auths:                 make(map[string]*Auth),
 		homeRuntimeAuths:      make(map[string]map[string]*Auth),
 		homeRuntimeAuthOwners: make(map[string]map[string]*HomeDispatchSelection),

@@ -993,7 +993,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, m.clock.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
@@ -1006,7 +1006,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errPick
 	}
 	if !handled {
-		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx := withSelectorNow(ctx, m.clock.Now())
+		selectorCtx = withWeightedSelectorStateModel(selectorCtx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, available)
 		if errPick != nil {
 			return nil, nil, errPick
@@ -1235,7 +1236,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, m.clock.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
@@ -1248,7 +1249,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errPick
 	}
 	if !handled {
-		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx := withSelectorNow(ctx, m.clock.Now())
+		selectorCtx = withWeightedSelectorStateModel(selectorCtx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, available)
 		if errPick != nil {
 			return nil, nil, "", errPick

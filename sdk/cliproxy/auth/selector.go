@@ -305,10 +305,25 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	return available, nil
 }
 
+type selectorNowContextKey struct{}
+
+func withSelectorNow(ctx context.Context, now time.Time) context.Context {
+	return context.WithValue(ctx, selectorNowContextKey{}, now)
+}
+
+func selectorNow(ctx context.Context) time.Time {
+	if ctx != nil {
+		if now, ok := ctx.Value(selectorNowContextKey{}).(time.Time); ok {
+			return now
+		}
+	}
+	return time.Now()
+}
+
 // Pick selects the next available auth for the provider in a round-robin manner.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	now := time.Now()
+	now := selectorNow(ctx)
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
@@ -355,7 +370,7 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, errAvailable := getAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now())
+	available, errAvailable := getAvailableAuths(positiveWeightAuths(auths), provider, model, selectorNow(ctx))
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
@@ -464,7 +479,7 @@ func saturatingAddInt64(value, delta int64) int64 {
 // Pick selects the first available auth for the provider in a deterministic manner.
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	now := time.Now()
+	now := selectorNow(ctx)
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
@@ -578,7 +593,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 
-	now := time.Now()
+	now := selectorNow(ctx)
 	availabilityCandidates := auths
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
