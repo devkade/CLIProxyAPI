@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -211,6 +212,86 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	if got != want {
 		t.Fatalf("unexpected split-data framing.\nGot:  %q\nWant: %q", got, want)
 	}
+}
+
+func TestForwardResponsesStreamPreservesFragmentedUTF8Events(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	events := []string{
+		`event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"안녕"}\n\n`,
+		`event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"推理"}\n\n`,
+		`event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","delta":"{\"도시\":\"北京\"}"}\n\n`,
+		`event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-utf8","output":[]}}\n\n`,
+		`data: [DONE]\n\n`,
+	}
+	data := make(chan []byte, len(events)*2)
+	for _, event := range events {
+		raw := []byte(strings.ReplaceAll(event, `\n`, "\n"))
+		split := len(raw)
+		for i := range raw {
+			if raw[i]&0xc0 == 0xc0 {
+				split = i + 1
+				break
+			}
+		}
+		data <- raw[:split]
+		if split < len(raw) {
+			data <- raw[split:]
+		}
+	}
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	body := recorder.Body.Bytes()
+	if !utf8.Valid(body) {
+		t.Fatalf("forwarded body is not valid UTF-8: %q", body)
+	}
+	if strings.ContainsRune(string(body), utf8.RuneError) {
+		t.Fatalf("forwarded body contains a replacement character: %q", body)
+	}
+
+	frames := strings.Split(strings.TrimSpace(string(body)), "\n\n")
+	if len(frames) != len(events) {
+		t.Fatalf("event count = %d, want %d; body=%q", len(frames), len(events), body)
+	}
+	wantTypes := []string{
+		"response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.function_call_arguments.delta",
+		"response.completed",
+	}
+	for i, wantType := range wantTypes {
+		payload, ok := responsesSSEDataPayload([]byte(frames[i]))
+		if !ok || !gjson.ValidBytes(payload) {
+			t.Fatalf("event %d has invalid SSE JSON: %q", i, frames[i])
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantType {
+			t.Fatalf("event %d type = %q, want %q", i, got, wantType)
+		}
+	}
+	if got := gjson.GetBytes(mustResponsesSSEPayload(t, frames[0]), "delta").String(); got != "안녕" {
+		t.Fatalf("text delta = %q", got)
+	}
+	if got := gjson.GetBytes(mustResponsesSSEPayload(t, frames[1]), "delta").String(); got != "推理" {
+		t.Fatalf("reasoning delta = %q", got)
+	}
+	if got := gjson.GetBytes(mustResponsesSSEPayload(t, frames[2]), "delta").String(); got != `{"도시":"北京"}` {
+		t.Fatalf("tool arguments delta = %q", got)
+	}
+	if payload, ok := responsesSSEDataPayload([]byte(frames[4])); !ok || string(payload) != "[DONE]" {
+		t.Fatalf("terminal event = %q", frames[4])
+	}
+}
+
+func mustResponsesSSEPayload(t *testing.T, frame string) []byte {
+	t.Helper()
+	payload, ok := responsesSSEDataPayload([]byte(frame))
+	if !ok {
+		t.Fatalf("missing SSE data payload: %q", frame)
+	}
+	return payload
 }
 
 func TestResponsesSSENeedsLineBreakSkipsChunksThatAlreadyStartWithNewline(t *testing.T) {

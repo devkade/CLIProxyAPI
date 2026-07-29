@@ -198,7 +198,9 @@ type authAwareStreamExecutor struct {
 
 type invalidJSONStreamExecutor struct{}
 
-type splitResponsesEventStreamExecutor struct{}
+type splitResponsesEventStreamExecutor struct {
+	chunks [][]byte
+}
 
 func (e *invalidJSONStreamExecutor) Identifier() string { return "codex" }
 
@@ -236,9 +238,17 @@ func (e *splitResponsesEventStreamExecutor) Execute(context.Context, *coreauth.A
 }
 
 func (e *splitResponsesEventStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	ch := make(chan coreexecutor.StreamChunk, 2)
-	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed")}
-	ch <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}")}
+	chunks := e.chunks
+	if chunks == nil {
+		chunks = [][]byte{
+			[]byte("event: response.completed"),
+			[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"),
+		}
+	}
+	ch := make(chan coreexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		ch <- coreexecutor.StreamChunk{Payload: chunk}
+	}
 	close(ch)
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -1146,14 +1156,65 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesSSEEventLines(t 
 		}
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("expected 2 forwarded chunks, got %d: %#v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 reassembled chunk, got %d: %#v", len(got), got)
 	}
-	if got[0] != "event: response.completed" {
-		t.Fatalf("unexpected first chunk: %q", got[0])
+	want := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
+	if got[0] != want {
+		t.Fatalf("unexpected reassembled chunk.\nGot:  %q\nWant: %q", got[0], want)
 	}
-	expectedData := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
-	if got[1] != expectedData {
-		t.Fatalf("unexpected second chunk.\nGot:  %q\nWant: %q", got[1], expectedData)
+}
+
+func TestExecuteStreamWithAuthManager_AllowsFragmentedUTF8OpenAIResponsesEvents(t *testing.T) {
+	events := []string{
+		`event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"안녕"}\n\n`,
+		`event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"推理"}\n\n`,
+		`event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","delta":"{\"도시\":\"北京\"}"}\n\n`,
+		`event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-utf8","output":[]}}\n\n`,
+		`data: [DONE]\n\n`,
+	}
+
+	var chunks [][]byte
+	var want []byte
+	for _, event := range events {
+		raw := []byte(strings.ReplaceAll(event, `\n`, "\n"))
+		want = append(want, raw...)
+		split := -1
+		for i := 0; i < len(raw); i++ {
+			if raw[i]&0xc0 == 0xc0 {
+				split = i + 1
+				break
+			}
+		}
+		if split < 0 {
+			chunks = append(chunks, raw)
+			continue
+		}
+		chunks = append(chunks, raw[:split], raw[split:])
+	}
+
+	executor := &splitResponsesEventStreamExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-utf8", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for errMsg := range errChan {
+		if errMsg != nil {
+			t.Fatalf("unexpected stream error: %v", errMsg.Error)
+		}
+	}
+	if string(got) != string(want) {
+		t.Fatalf("forwarded stream mismatch\n got: %q\nwant: %q", got, want)
 	}
 }

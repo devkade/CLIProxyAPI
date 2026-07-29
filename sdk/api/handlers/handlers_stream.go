@@ -116,6 +116,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		close(closed)
 		chunks = closed
 	}
+	var responsesValidator sseDataJSONStreamValidator
 	go func() {
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
@@ -138,6 +139,18 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 				return
 			}
 			if !ok {
+				if responseProtocol == "openai-response" {
+					if errValidate := responsesValidator.Finish(); errValidate != nil {
+						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
+						completionOutcome = pluginapi.RequestCompletionFailed
+						completionStatus = errMsg.StatusCode
+						completionErr = errValidate
+						select {
+						case errChan <- errMsg:
+						case <-done:
+						}
+					}
+				}
 				return
 			}
 			if chunk.Err != nil {
@@ -187,7 +200,8 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 				chunkIndex++
 			}
 			if responseProtocol == "openai-response" {
-				if errValidate := validateSSEDataJSON(payload); errValidate != nil {
+				validated, deliverable, errValidate := responsesValidator.Write(payload)
+				if errValidate != nil {
 					completionOutcome = pluginapi.RequestCompletionFailed
 					completionStatus = http.StatusBadGateway
 					completionErr = errValidate
@@ -202,6 +216,10 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					}
 					return
 				}
+				if !deliverable {
+					continue
+				}
+				payload = validated
 			}
 			select {
 			case dataChan <- payload:
@@ -349,6 +367,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		streamHeaderInitialized = true
 	}
 
+	var responsesValidator sseDataJSONStreamValidator
 	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		applyStreamHeaderInit()
 		payload = cloneBytes(payload)
@@ -380,9 +399,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			(*chunkIndex)++
 		}
 		if responseProtocol == "openai-response" {
-			if errValidate := validateSSEDataJSON(payload); errValidate != nil {
+			validated, deliverable, errValidate := responsesValidator.Write(payload)
+			if errValidate != nil {
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
 			}
+			if !deliverable {
+				return nil, false, nil
+			}
+			payload = validated
 		}
 		return payload, true, nil
 	}
@@ -409,6 +433,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if !ok {
 				streamClosedBeforeRead = true
 				applyStreamHeaderInit()
+				if responseProtocol == "openai-response" {
+					if errValidate := responsesValidator.Finish(); errValidate != nil {
+						bootstrapErr = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
+					}
+				}
 				return
 			}
 			if chunk.Err != nil {
@@ -481,6 +510,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapPayload = nil
 		bootstrapChunkIndex = 0
 		bootstrapHistoryChunks = nil
+		responsesValidator = sseDataJSONStreamValidator{}
 		chunks = retryResult.Chunks
 		if chunks == nil {
 			closed := make(chan coreexecutor.StreamChunk)
@@ -581,6 +611,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if !ok {
+				if responseProtocol == "openai-response" {
+					if errValidate := responsesValidator.Finish(); errValidate != nil {
+						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
+						completionOutcome = pluginapi.RequestCompletionFailed
+						completionStatus = errMsg.StatusCode
+						completionErr = errValidate
+						sendErr(errMsg)
+					}
+				}
 				return
 			}
 			if chunk.Err != nil {
@@ -627,6 +666,104 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
+}
+
+type sseDataJSONStreamValidator struct {
+	pending []byte
+}
+
+func (v *sseDataJSONStreamValidator) Write(chunk []byte) ([]byte, bool, error) {
+	if len(chunk) == 0 {
+		return nil, false, nil
+	}
+	if len(v.pending) == 0 && !sseChunkHasSSEField(chunk) {
+		return chunk, true, nil
+	}
+	if sseValidationNeedsLineBreak(v.pending, chunk) {
+		v.pending = append(v.pending, '\n')
+	}
+	v.pending = append(v.pending, chunk...)
+
+	var ready []byte
+	for {
+		frameLen := sseValidationFrameLen(v.pending)
+		if frameLen == 0 {
+			break
+		}
+		if err := validateSSEDataJSON(v.pending[:frameLen]); err != nil {
+			return nil, false, err
+		}
+		ready = append(ready, v.pending[:frameLen]...)
+		v.pending = append(v.pending[:0], v.pending[frameLen:]...)
+	}
+
+	if sseChunkHasDataField(v.pending) && validateSSEDataJSON(v.pending) == nil {
+		ready = append(ready, v.pending...)
+		v.pending = v.pending[:0]
+	}
+	return ready, len(ready) > 0, nil
+}
+
+func (v *sseDataJSONStreamValidator) Finish() error {
+	if len(bytes.TrimSpace(v.pending)) == 0 {
+		v.pending = v.pending[:0]
+		return nil
+	}
+	err := validateSSEDataJSON(v.pending)
+	v.pending = v.pending[:0]
+	return err
+}
+
+func sseValidationFrameLen(chunk []byte) int {
+	lf := bytes.Index(chunk, []byte("\n\n"))
+	crlf := bytes.Index(chunk, []byte("\r\n\r\n"))
+	switch {
+	case lf < 0 && crlf < 0:
+		return 0
+	case lf < 0:
+		return crlf + 4
+	case crlf < 0 || lf < crlf:
+		return lf + 2
+	default:
+		return crlf + 4
+	}
+}
+
+func sseChunkHasDataField(chunk []byte) bool {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
+			return true
+		}
+	}
+	return false
+}
+
+func sseChunkHasSSEField(chunk []byte) bool {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
+			if bytes.HasPrefix(trimmed, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sseValidationNeedsLineBreak(pending, chunk []byte) bool {
+	if len(pending) == 0 || len(chunk) == 0 || bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) {
+		return false
+	}
+	if chunk[0] == '\n' || chunk[0] == '\r' {
+		return false
+	}
+	trimmed := bytes.TrimLeft(chunk, " \t")
+	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
+		if bytes.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSSEDataJSON(chunk []byte) error {
