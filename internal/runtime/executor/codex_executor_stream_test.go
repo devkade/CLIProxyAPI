@@ -29,13 +29,14 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 	return 1, nil
 }
 
-func TestCodexExecutorExecuteStreamPreservesSSEFrameSeparators(t *testing.T) {
+func TestCodexExecutorExecuteStreamPreservesSSEFrameSeparatorsAndDoneFrame(t *testing.T) {
 	upstream := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n" +
 		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"推理\"}\r\n\r\n" +
 		"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"city\\\":\\\"北京\\\"}\"}\n\n" +
 		"data: {\"type\":\"response.output_text.done\",\"text\":\"完成\"}\n\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\r\n\r\n")
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\r\n\r\n" +
+		"data: [DONE]\n\n")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -70,7 +71,7 @@ func TestCodexExecutorExecuteStreamPreservesSSEFrameSeparators(t *testing.T) {
 		}
 		downstream = append(downstream, chunk.Payload...)
 	}
-	if got, want := bytes.Count(downstream, []byte("\n\n"))+bytes.Count(downstream, []byte("\r\n\r\n")), 6; got != want {
+	if got, want := bytes.Count(downstream, []byte("\n\n"))+bytes.Count(downstream, []byte("\r\n\r\n")), 7; got != want {
 		t.Fatalf("downstream delimiter count = %d, want %d; downstream=%q", got, want, downstream)
 	}
 	if !bytes.Equal(downstream, upstream) {

@@ -221,6 +221,33 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						return
 					}
 				}
+				if doneLine, doneErr := readCodexSSELine(reader); len(doneLine) > 0 {
+					doneLine = applyCodexIdentityConfuseResponsePayload(doneLine, identityState)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, doneLine)
+					translatedDone := applyCodexIdentityExposeResponsePayload(bytes.Clone(doneLine), identityState)
+					chunks = helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedDone, &param, claudeInputTokens)
+					for i := range chunks {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+						case <-ctx.Done():
+							return
+						}
+					}
+					if separator := readCodexSSESeparator(reader); len(separator) > 0 {
+						helps.AppendAPIResponseChunk(ctx, e.cfg, separator)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(separator)}:
+						case <-ctx.Done():
+							return
+						}
+					}
+					if doneErr != nil && doneErr != io.EOF {
+						if ctx.Err() != nil {
+							return
+						}
+						helps.RecordAPIResponseError(ctx, e.cfg, doneErr)
+					}
+				}
 				return
 			}
 		}
