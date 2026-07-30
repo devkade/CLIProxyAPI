@@ -100,6 +100,19 @@ private scopes, inferred model aliases, and endpoint fallback behavior.
 | Docker login and restart preserve accounts | Device flow needs no inbound callback and is Docker-safe in principle. Persistence cannot be accepted until the credential schema and upstream usage are supportable. | Blocked. |
 | Deterministic auth, streaming, tools, expiry, and error tests | Fixtures derived only from reverse engineering would pin undocumented behavior rather than a supported contract. | Blocked. |
 
+## Disposition
+
+Implementation acceptance remains unmet. In particular, there is no completed
+supported login that writes the expected redacted auth record, no supported
+request through the OpenAI-compatible API and account pool, no demonstrated
+single actionable failure for expired or revoked credentials, no verified
+Docker login and restart persistence, and no deterministic supported-contract
+test coverage for authentication, streaming, tools, expiry, and error mapping.
+
+This report is research for issue #8 and must not close it. The issue must
+remain open until an implementation satisfies those acceptance criteria using
+documented, stable upstream flows.
+
 ## Required security and persistence contract
 
 If the upstream gate is cleared, a completed device login may write exactly one
