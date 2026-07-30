@@ -4,8 +4,9 @@
 
 **Decision date:** 2026-07-29
 
-**Decision:** Configure Cline as an OpenAI-compatible client. Do not add a
-Cline-specific provider.
+**Decision:** Configure Cline as an OpenAI-compatible client and use the
+documented standard Chat Completions endpoint for the hosted Cline API. Do not
+add a Cline-specific provider.
 
 Cline and the Cline API are two different integration directions:
 
@@ -20,7 +21,9 @@ Cline and the Cline API are two different integration directions:
 Neither direction has a Cline-specific transport, credential lifecycle, or
 translation boundary. A native provider would duplicate supported generic
 behavior and incorrectly couple the Cline client identity to the Cline-hosted
-API.
+API. This conclusion covers the documented standard OpenAI Chat Completions
+contract only; it does not claim compatibility with legacy Cline envelopes or
+nonstandard reasoning fields.
 
 No provider, OAuth command, credential importer, executor, translator, or
 model aliases are registered by this evaluation.
@@ -148,6 +151,35 @@ cooldown behavior apply without a new Cline credential type. The API's model
 IDs can be declared in configuration; a native hard-coded catalog would age
 faster and add no protocol capability.
 
+### Standard-endpoint scope and legacy caveats
+
+The supported configuration above is proven only when the upstream returns the
+documented OpenAI Chat Completions response at the standard endpoint: top-level
+`choices`, `model`, and `usage`, with standard streaming events when streaming
+is requested. The deterministic fixture in
+`test/fixtures/cline-standard-endpoint.yaml` exercises that contract through
+CLIProxyAPI's authenticated `/v1/models` and `/v1/chat/completions` routes. It
+also proves the `cline` prefix, model alias rewrite, upstream bearer header, and
+non-streaming standard response.
+
+This does not cover older or intermediary Cline behavior reported upstream:
+
+- [#3852](https://github.com/router-for-me/CLIProxyAPI/issues/3852) records a
+  Cline response wrapped as `{"success":true,"data":{...}}`, which is not a
+  standard top-level Chat Completions envelope.
+- [#4512](https://github.com/router-for-me/CLIProxyAPI/issues/4512) reproduces
+  that envelope on the Claude Messages bridge and also records Cline's
+  nonstandard `reasoning` field; the maintainers declined built-in adaptation
+  and directed provider-specific normalization to the plugin system.
+- [#4154](https://github.com/router-for-me/CLIProxyAPI/issues/4154) tracks the
+  broader OpenAI-to-Claude reasoning mismatch when an upstream emits
+  `reasoning` or `reasoning_details` rather than `reasoning_content`.
+
+Deployments receiving those legacy shapes need a response normalizer, such as
+the `examples/plugin/response-normalizer/` plugin path. This evaluation does
+not assert legacy-envelope, OpenAI-to-Claude reasoning, or `/v1/messages`
+compatibility.
+
 ## Acceptance mapping
 
 | Issue #12 requirement | Evidence | Result |
@@ -157,7 +189,7 @@ faster and add no protocol capability.
 | Determine whether a distinct provider API exists | Cline publishes a supported hosted Chat Completions API. | Yes, but it is already covered by `openai-compatibility` |
 | Determine whether protocol translation is required | Cline emits and accepts the OpenAI-compatible contract used at both existing boundaries. | No new translation |
 | Define model behavior | Cline client selects `/v1/models` output; hosted Cline API uses documented `provider/model` IDs configured as generic upstream models. | Existing model mechanisms suffice |
-| Minimal end-to-end request | The client settings target CLIProxyAPI's existing model and chat routes; the same path is covered by deterministic route/executor tests and the local protocol exercise recorded with this change. | Pass without new provider code |
+| Minimal end-to-end request | The client settings target CLIProxyAPI's existing model and chat routes; `TestClineStandardEndpointThroughOpenAICompatProxy` deterministically covers local bearer auth, model listing, prefix and alias routing, upstream bearer auth, and a standard non-streaming response. | Pass for the documented standard endpoint without new provider code |
 | Docker and security constraints | Host/container URLs are explicit; only dedicated local and upstream API keys are used; no browser-token workaround is involved. | Pass |
 
 ## Re-evaluation trigger
@@ -168,4 +200,5 @@ request/stream protocol, a required refreshable application OAuth grant, or a
 provider-only operation needed by CLIProxyAPI. A new model name, hosted model,
 or Cline client release is not such a trigger.
 
-Until then, the correct integration is configuration, not provider code.
+For the documented standard endpoint, the correct integration is configuration,
+not provider code.

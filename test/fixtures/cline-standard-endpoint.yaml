@@ -1,0 +1,12 @@
+api-keys:
+  - "cline-local-client-key"
+
+openai-compatibility:
+  - name: "cline-api"
+    prefix: "cline"
+    base-url: "${CLINE_MOCK_BASE_URL}"
+    api-key-entries:
+      - api-key: "cline-upstream-api-key"
+    models:
+      - name: "anthropic/claude-sonnet-4-6"
+        alias: "claude-sonnet-4-6"
