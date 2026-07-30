@@ -1,6 +1,9 @@
 package openai
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -170,7 +173,7 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
-	got := strings.TrimSuffix(recorder.Body.String(), "\n")
+	got := recorder.Body.String()
 	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
 	if got != want {
 		t.Fatalf("unexpected split-event framing.\nGot:  %q\nWant: %q", got, want)
@@ -189,7 +192,7 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
-	got := strings.TrimSuffix(recorder.Body.String(), "\n")
+	got := recorder.Body.String()
 	if got != string(chunk) {
 		t.Fatalf("unexpected full-event framing.\nGot:  %q\nWant: %q", got, string(chunk))
 	}
@@ -208,7 +211,7 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	got := recorder.Body.String()
-	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n\n"
+	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
 	if got != want {
 		t.Fatalf("unexpected split-data framing.\nGot:  %q\nWant: %q", got, want)
 	}
@@ -303,18 +306,45 @@ func TestResponsesSSENeedsLineBreakSkipsChunksThatAlreadyStartWithNewline(t *tes
 	}
 }
 
-func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testing.T) {
+func TestForwardResponsesStreamMatchesExactBytesAndDelimiterCount(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
 	data := make(chan []byte, 1)
 	errs := make(chan *interfaces.ErrorMessage)
-	data <- []byte("data: {\"type\":\"response.created\"")
+	chunk := []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")
+	data <- chunk
 	close(data)
 	close(errs)
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
-	if got := recorder.Body.String(); got != "\n" {
-		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
+	got := recorder.Body.Bytes()
+	if !bytes.Equal(got, chunk) {
+		t.Fatalf("terminal stream bytes differ\n got: %q\nwant: %q", got, chunk)
+	}
+	if gotCount := bytes.Count(got, []byte("\n\n")) + bytes.Count(got, []byte("\r\n\r\n")); gotCount != 1 {
+		t.Fatalf("delimiter count = %d, want 1; body=%q", gotCount, got)
+	}
+	gotHash := sha256.Sum256(got)
+	wantHash := sha256.Sum256(chunk)
+	if gotHash != wantHash {
+		t.Fatalf("sha256 = %s, want %s", hex.EncodeToString(gotHash[:]), hex.EncodeToString(wantHash[:]))
+	}
+}
+
+func TestForwardResponsesStreamDoesNotAppendExtraTerminalNewline(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	chunk := []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")
+	data <- chunk
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	if got := recorder.Body.Bytes(); !bytes.Equal(got, chunk) {
+		t.Fatalf("terminal stream bytes differ\n got: %q\nwant: %q", got, chunk)
 	}
 }
