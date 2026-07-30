@@ -426,7 +426,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
-// The handler is served as-is without additional middleware beyond the standard stack already configured.
+// Authenticated routes apply the same client-key rate limit as the HTTP API.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
 		return
@@ -447,6 +447,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRouteMu.Unlock()
 
 	authMiddleware := AuthMiddleware(s.accessManager)
+	rateLimitMiddleware := s.clientKeyRateLimitMiddleware()
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			c.Next()
@@ -454,12 +455,19 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 		}
 		authMiddleware(c)
 	}
+	conditionalRateLimit := func(c *gin.Context) {
+		if !s.wsAuthEnabled.Load() {
+			c.Next()
+			return
+		}
+		rateLimitMiddleware(c)
+	}
 	finalHandler := func(c *gin.Context) {
 		handler.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 	}
 
-	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+	s.engine.GET(trimmed, conditionalAuth, conditionalRateLimit, finalHandler)
 }
 
 // isAnthropicModelsRequest reports whether a /v1/models request should be served in

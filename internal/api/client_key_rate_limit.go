@@ -35,6 +35,10 @@ func (l *clientKeyRateLimiter) Configure(cfg config.ClientKeyRateLimitConfig) {
 		cfg.MaxTrackedKeys = config.DefaultClientKeyRateLimitMaxTrackedKeys
 	}
 	l.mu.Lock()
+	if l.config == cfg {
+		l.mu.Unlock()
+		return
+	}
 	l.config = cfg
 	l.buckets = make(map[[sha256.Size]byte]*clientKeyBucket)
 	l.useSeq = 0

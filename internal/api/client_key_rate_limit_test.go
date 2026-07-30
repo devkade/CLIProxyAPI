@@ -153,3 +153,58 @@ func TestClientKeyRateLimitRunsAfterAuthAndHotReloads(t *testing.T) {
 		t.Fatalf("disabled retained %d buckets", got)
 	}
 }
+
+func TestClientKeyRateLimitAppliesToAuthenticatedWebsocketRoute(t *testing.T) {
+	server := newTestServer(t)
+	cfg := *server.cfg
+	cfg.WebsocketAuth = true
+	cfg.ClientKeyRateLimit = testRateLimitConfig(2, 10)
+	server.UpdateClients(&cfg)
+
+	server.AttachWebsocketRoute("/v1/ws", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+	request := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/ws", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		return rr
+	}
+
+	if rr := request("invalid-secret"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+	for i := 0; i < cfg.ClientKeyRateLimit.Burst; i++ {
+		if rr := request("test-key"); rr.Code != http.StatusSwitchingProtocols {
+			t.Fatalf("upgrade %d status = %d, want %d", i+1, rr.Code, http.StatusSwitchingProtocols)
+		}
+	}
+	rr := request("test-key")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited upgrade status = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+	if got := rr.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestClientKeyRateLimitUnrelatedReloadPreservesBucket(t *testing.T) {
+	server := newTestServer(t)
+	cfg := *server.cfg
+	cfg.ClientKeyRateLimit = testRateLimitConfig(1, 10)
+	server.UpdateClients(&cfg)
+
+	if allowed, _ := server.clientKeyRateLimiter.Allow("test-key"); !allowed {
+		t.Fatal("initial token was unexpectedly limited")
+	}
+	reloaded := cfg
+	reloaded.Debug = !cfg.Debug
+	server.UpdateClients(&reloaded)
+
+	if allowed, _ := server.clientKeyRateLimiter.Allow("test-key"); allowed {
+		t.Fatal("unrelated reload reset the spent bucket")
+	}
+}
