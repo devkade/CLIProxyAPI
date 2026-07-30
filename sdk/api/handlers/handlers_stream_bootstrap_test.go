@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -241,7 +243,7 @@ func (e *splitResponsesEventStreamExecutor) ExecuteStream(context.Context, *core
 	chunks := e.chunks
 	if chunks == nil {
 		chunks = [][]byte{
-			[]byte("event: response.completed"),
+			[]byte("event: response.completed\n"),
 			[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"),
 		}
 	}
@@ -1216,5 +1218,84 @@ func TestExecuteStreamWithAuthManager_AllowsFragmentedUTF8OpenAIResponsesEvents(
 	}
 	if string(got) != string(want) {
 		t.Fatalf("forwarded stream mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSSEDataJSONStreamValidatorPreservesEveryPrefixSplit(t *testing.T) {
+	event := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"data: event: id: retry: : keep\"}\n\n")
+
+	for split := 0; split <= len(event); split++ {
+		t.Run(fmt.Sprintf("prefix-%d", split), func(t *testing.T) {
+			var validator sseDataJSONStreamValidator
+			var got []byte
+			for _, chunk := range [][]byte{event[:split], event[split:]} {
+				ready, deliverable, err := validator.Write(chunk)
+				if err != nil {
+					t.Fatalf("Write returned error: %v", err)
+				}
+				if deliverable {
+					got = append(got, ready...)
+				}
+			}
+			final, err := validator.Finish()
+			if err != nil {
+				t.Fatalf("Finish returned error: %v", err)
+			}
+			got = append(got, final...)
+			if !bytes.Equal(got, event) {
+				t.Fatalf("stream changed at split %d\n got: %q\nwant: %q", split, got, event)
+			}
+		})
+	}
+}
+
+func TestSSEDataJSONStreamValidatorRejectsOversizeEventWithoutRetainingOrLeakingIt(t *testing.T) {
+	const maxPendingEventBytes = 16 << 20
+	secret := []byte("super-secret-upstream-payload")
+	chunk := append([]byte("data: \""), bytes.Repeat(secret, maxPendingEventBytes/len(secret)+1)...)
+
+	var validator sseDataJSONStreamValidator
+	_, _, err := validator.Write(chunk)
+	if err == nil {
+		t.Fatal("expected oversized pending SSE event to fail")
+	}
+	if bytes.Contains([]byte(err.Error()), secret) {
+		t.Fatalf("error leaked upstream event data: %v", err)
+	}
+	if len(validator.pending) != 0 {
+		t.Fatalf("retained %d pending bytes after rejection", len(validator.pending))
+	}
+}
+
+func TestExecuteStreamWithAuthManagerReportsOneRedactedOversizeSSEError(t *testing.T) {
+	secret := []byte("super-secret-upstream-payload")
+	chunk := append([]byte("data: \""), bytes.Repeat(secret, maxPendingSSEEventBytes/len(secret)+1)...)
+	executor := &splitResponsesEventStreamExecutor{chunks: [][]byte{chunk}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-oversize-sse", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	for payload := range dataChan {
+		t.Fatalf("unexpected payload before oversize error: %q", payload)
+	}
+	var errorsSeen int
+	for errMsg := range errChan {
+		errorsSeen++
+		if errMsg == nil || errMsg.StatusCode != http.StatusBadGateway || errMsg.Error == nil {
+			t.Fatalf("unexpected stream error: %#v", errMsg)
+		}
+		if bytes.Contains([]byte(errMsg.Error.Error()), secret) {
+			t.Fatalf("stream error leaked upstream event data: %v", errMsg.Error)
+		}
+	}
+	if errorsSeen != 1 {
+		t.Fatalf("stream errors = %d, want 1", errorsSeen)
 	}
 }

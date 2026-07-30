@@ -140,7 +140,8 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			if !ok {
 				if responseProtocol == "openai-response" {
-					if errValidate := responsesValidator.Finish(); errValidate != nil {
+					finalPayload, errValidate := responsesValidator.Finish()
+					if errValidate != nil {
 						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
 						completionOutcome = pluginapi.RequestCompletionFailed
 						completionStatus = errMsg.StatusCode
@@ -148,6 +149,18 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 						select {
 						case errChan <- errMsg:
 						case <-done:
+						}
+						return
+					}
+					if len(finalPayload) > 0 {
+						select {
+						case dataChan <- finalPayload:
+						case <-done:
+							completionOutcome = pluginapi.RequestCompletionCanceled
+							completionStatus = 0
+							if ctx != nil {
+								completionErr = ctx.Err()
+							}
 						}
 					}
 				}
@@ -434,8 +447,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				streamClosedBeforeRead = true
 				applyStreamHeaderInit()
 				if responseProtocol == "openai-response" {
-					if errValidate := responsesValidator.Finish(); errValidate != nil {
+					finalPayload, errValidate := responsesValidator.Finish()
+					if errValidate != nil {
 						bootstrapErr = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
+					} else {
+						bootstrapPayload = finalPayload
 					}
 				}
 				return
@@ -612,12 +628,21 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 			if !ok {
 				if responseProtocol == "openai-response" {
-					if errValidate := responsesValidator.Finish(); errValidate != nil {
+					finalPayload, errValidate := responsesValidator.Finish()
+					if errValidate != nil {
 						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
 						completionOutcome = pluginapi.RequestCompletionFailed
 						completionStatus = errMsg.StatusCode
 						completionErr = errValidate
 						sendErr(errMsg)
+						return
+					}
+					if len(finalPayload) > 0 && !sendData(finalPayload) {
+						completionOutcome = pluginapi.RequestCompletionCanceled
+						completionStatus = 0
+						if ctx != nil {
+							completionErr = ctx.Err()
+						}
 					}
 				}
 				return
@@ -668,102 +693,82 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	return dataChan, upstreamHeaders, errChan
 }
 
+const maxPendingSSEEventBytes = 16 << 20
+
 type sseDataJSONStreamValidator struct {
-	pending []byte
+	pending    []byte
+	scanCursor int
 }
 
 func (v *sseDataJSONStreamValidator) Write(chunk []byte) ([]byte, bool, error) {
-	if len(chunk) == 0 {
-		return nil, false, nil
-	}
-	if len(v.pending) == 0 && !sseChunkHasSSEField(chunk) {
-		return chunk, true, nil
-	}
-	if sseValidationNeedsLineBreak(v.pending, chunk) {
-		v.pending = append(v.pending, '\n')
-	}
-	v.pending = append(v.pending, chunk...)
-
 	var ready []byte
-	for {
-		frameLen := sseValidationFrameLen(v.pending)
-		if frameLen == 0 {
-			break
+	for len(chunk) > 0 {
+		room := maxPendingSSEEventBytes - len(v.pending)
+		if room == 0 {
+			v.reset()
+			return nil, false, fmt.Errorf("upstream SSE event exceeds %d-byte limit", maxPendingSSEEventBytes)
 		}
-		if err := validateSSEDataJSON(v.pending[:frameLen]); err != nil {
-			return nil, false, err
+		if room > len(chunk) {
+			room = len(chunk)
 		}
-		ready = append(ready, v.pending[:frameLen]...)
-		v.pending = append(v.pending[:0], v.pending[frameLen:]...)
-	}
+		v.pending = append(v.pending, chunk[:room]...)
+		chunk = chunk[room:]
 
-	if sseChunkHasDataField(v.pending) && validateSSEDataJSON(v.pending) == nil {
-		ready = append(ready, v.pending...)
-		v.pending = v.pending[:0]
+		for {
+			frameLen := v.nextFrameLen()
+			if frameLen == 0 {
+				break
+			}
+			if err := validateSSEDataJSON(v.pending[:frameLen]); err != nil {
+				v.reset()
+				return nil, false, err
+			}
+			ready = append(ready, v.pending[:frameLen]...)
+			v.pending = v.pending[frameLen:]
+			v.scanCursor = 0
+		}
 	}
 	return ready, len(ready) > 0, nil
 }
 
-func (v *sseDataJSONStreamValidator) Finish() error {
-	if len(bytes.TrimSpace(v.pending)) == 0 {
-		v.pending = v.pending[:0]
-		return nil
+func (v *sseDataJSONStreamValidator) Finish() ([]byte, error) {
+	final := v.pending
+	if err := validateSSEDataJSON(final); err != nil {
+		v.reset()
+		return nil, err
 	}
-	err := validateSSEDataJSON(v.pending)
-	v.pending = v.pending[:0]
-	return err
+	v.pending = nil
+	v.scanCursor = 0
+	return final, nil
 }
 
-func sseValidationFrameLen(chunk []byte) int {
+func (v *sseDataJSONStreamValidator) nextFrameLen() int {
+	chunk := v.pending[v.scanCursor:]
 	lf := bytes.Index(chunk, []byte("\n\n"))
 	crlf := bytes.Index(chunk, []byte("\r\n\r\n"))
-	switch {
-	case lf < 0 && crlf < 0:
+	if lf < 0 && crlf < 0 {
+		v.scanCursor = len(v.pending) - 3
+		if v.scanCursor < 0 {
+			v.scanCursor = 0
+		}
 		return 0
+	}
+
+	frameLen := 0
+	switch {
 	case lf < 0:
-		return crlf + 4
+		frameLen = crlf + 4
 	case crlf < 0 || lf < crlf:
-		return lf + 2
+		frameLen = lf + 2
 	default:
-		return crlf + 4
+		frameLen = crlf + 4
 	}
+	return v.scanCursor + frameLen
 }
 
-func sseChunkHasDataField(chunk []byte) bool {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
-		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
-			return true
-		}
-	}
-	return false
-}
-
-func sseChunkHasSSEField(chunk []byte) bool {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
-		trimmed := bytes.TrimSpace(line)
-		for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
-			if bytes.HasPrefix(trimmed, prefix) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func sseValidationNeedsLineBreak(pending, chunk []byte) bool {
-	if len(pending) == 0 || len(chunk) == 0 || bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) {
-		return false
-	}
-	if chunk[0] == '\n' || chunk[0] == '\r' {
-		return false
-	}
-	trimmed := bytes.TrimLeft(chunk, " \t")
-	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
-		if bytes.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
+func (v *sseDataJSONStreamValidator) reset() {
+	v.pending = nil
+	v.scanCursor = 0
 }
 
 func validateSSEDataJSON(chunk []byte) error {
