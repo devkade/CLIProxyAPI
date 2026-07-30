@@ -172,7 +172,7 @@ func modelFallbackProviderFamily(auth *Auth, provider string) string {
 		}
 	}
 	switch provider {
-	case "openai", "openai-compatibility", "codex", "kimi", "xai":
+	case "openai", "openai-compatibility", "ollama-cloud", "codex", "kimi", "xai":
 		return "openai"
 	case "claude", "anthropic":
 		return "claude"
