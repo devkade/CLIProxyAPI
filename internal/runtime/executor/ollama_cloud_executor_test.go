@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -13,6 +14,52 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
+
+func TestOllamaCloudExecutorPreservesToolsAndMultimodalPayloads(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   string
+		payload []byte
+	}{
+		{
+			name:    "tools",
+			model:   "qwen3:8b",
+			payload: []byte(`{"model":"qwen3:8b","messages":[{"role":"user","content":"weather"}],"tools":[{"type":"function","function":{"name":"weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":"auto"}`),
+		},
+		{
+			name:    "multimodal",
+			model:   "qwen3-vl:235b",
+			payload: []byte(`{"model":"qwen3-vl:235b","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}]}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPayload []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPayload, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+
+			exec := NewOllamaCloudExecutor(&config.Config{})
+			_, err := exec.Execute(context.Background(), &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL + "/v1",
+				"api_key":  "not-a-real-key",
+			}}, cliproxyexecutor.Request{
+				Model:   tt.model,
+				Payload: tt.payload,
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if !bytes.Equal(gotPayload, tt.payload) {
+				t.Fatalf("upstream payload = %s, want exact %s", gotPayload, tt.payload)
+			}
+		})
+	}
+}
 
 func TestOllamaCloudExecutorChatAndAuthentication(t *testing.T) {
 	var gotPath, gotAuth string

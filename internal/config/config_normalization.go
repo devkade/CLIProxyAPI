@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -98,6 +99,54 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// NormalizeOllamaCloudBaseURL returns the canonical endpoint identity used by
+// Ollama Cloud config and synthesized authentication records.
+func NormalizeOllamaCloudBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return DefaultOllamaCloudBaseURL
+	}
+	return baseURL
+}
+
+// NormalizeOllamaCloudKeys normalizes enabled credentials and requires each to
+// expose at least one usable model mapping.
+func (cfg *Config) NormalizeOllamaCloudKeys() error {
+	if cfg == nil || len(cfg.OllamaCloudKey) == 0 {
+		return nil
+	}
+	out := make([]OllamaCloudKey, 0, len(cfg.OllamaCloudKey))
+	for i := range cfg.OllamaCloudKey {
+		entry := cfg.OllamaCloudKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = NormalizeOllamaCloudBaseURL(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		models := make([]OllamaCloudModel, 0, len(entry.Models))
+		for j := range entry.Models {
+			model := entry.Models[j]
+			model.Name = strings.TrimSpace(model.Name)
+			if model.Name == "" {
+				continue
+			}
+			model.Alias = strings.TrimSpace(model.Alias)
+			model.DisplayName = strings.TrimSpace(model.DisplayName)
+			models = append(models, model)
+		}
+		if len(models) == 0 {
+			return fmt.Errorf("ollama-cloud-api-key[%d].models: at least one valid model mapping is required", i)
+		}
+		entry.Models = models
+		out = append(out, entry)
+	}
+	cfg.OllamaCloudKey = out
+	return nil
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -351,14 +352,11 @@ func (s *Service) resolveConfigOllamaCloudKey(auth *coreauth.Auth) *config.Ollam
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrBase = internalconfig.NormalizeOllamaCloudBaseURL(auth.Attributes["base_url"])
 	}
 	for i := range s.cfg.OllamaCloudKey {
 		entry := &s.cfg.OllamaCloudKey[i]
-		baseURL := strings.TrimSpace(entry.BaseURL)
-		if baseURL == "" {
-			baseURL = config.DefaultOllamaCloudBaseURL
-		}
+		baseURL := internalconfig.NormalizeOllamaCloudBaseURL(entry.BaseURL)
 		if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) && strings.EqualFold(baseURL, attrBase) {
 			return entry
 		}

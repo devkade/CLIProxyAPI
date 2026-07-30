@@ -22,7 +22,7 @@ ollama-cloud-api-key:
         output-modalities: [text]
 ```
 
-The explicit model list is the credential's permitted CLIProxyAPI catalog. It makes `/v1/models` deterministic and avoids assuming that every cloud model has the same tools, vision, or reasoning capabilities. Use model identifiers from Ollama's cloud catalog or from either official listing endpoint:
+The explicit model list is the credential's permitted CLIProxyAPI catalog. Each enabled credential must contain at least one model with a non-empty `name`; startup rejects an empty or wholly invalid list. This makes `/v1/models` deterministic and avoids assuming that every cloud model has the same tools, vision, or reasoning capabilities. Use model identifiers from Ollama's cloud catalog or from either official listing endpoint:
 
 ```sh
 curl -fsS https://ollama.com/api/tags
@@ -32,6 +32,10 @@ curl -fsS https://ollama.com/v1/models
 CLIProxyAPI sends the configured key only as `Authorization: Bearer ...` to the upstream. Upstream authentication failures retain their HTTP status and do not include the configured key in the returned error or request logs.
 
 Cloud chat, streaming, tools, and multimodal input are passed through according to Ollama's OpenAI compatibility contract and the capabilities of the selected model. Do not declare image input for a model unless Ollama lists that capability.
+
+Ollama Cloud remains a first-class provider rather than an example generic endpoint. That preserves independent credential identity, bounds model registration to each credential's explicit catalog, keeps health and cooldown state separate from unrelated OpenAI-compatible providers, and supplies Ollama's official default URL without conflating it with a host-local server.
+
+Reasoning output is a known limitation: this integration preserves fields exposed by Ollama's OpenAI-compatible endpoint, but it does not translate Ollama-native thinking traces or promise a normalized reasoning field. Treat reasoning visibility as model- and upstream-contract-dependent.
 
 ## Host-local Ollama from Docker
 
@@ -50,16 +54,18 @@ openai-compatibility:
 
 A container reaches direct Ollama Cloud over normal HTTPS and does not use `host.docker.internal`.
 
-## Smoke test
+## Smoke tests
 
-With CLIProxyAPI running and a frontend API key configured:
+Deterministic proxy tests use a mock upstream and require no provider credential. A live provider smoke is deliberately opt-in and exits before making a request unless `OLLAMA_CLOUD_API_KEY` is set:
 
 ```sh
-curl -fsS http://127.0.0.1:8317/v1/models \
-  -H 'Authorization: Bearer YOUR_CLIPROXY_KEY'
-
-curl -fsS http://127.0.0.1:8317/v1/chat/completions \
-  -H 'Authorization: Bearer YOUR_CLIPROXY_KEY' \
+: "${OLLAMA_CLOUD_API_KEY:?set OLLAMA_CLOUD_API_KEY to opt in to a live Ollama Cloud request}"
+curl -fsS https://ollama.com/v1/models \
+  -H "Authorization: Bearer ${OLLAMA_CLOUD_API_KEY}"
+curl -fsS https://ollama.com/v1/chat/completions \
+  -H "Authorization: Bearer ${OLLAMA_CLOUD_API_KEY}" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-oss:120b","messages":[{"role":"user","content":"Say hello"}]}'
+  -d '{"model":"gpt-oss:120b","messages":[{"role":"user","content":"Reply with: ollama cloud live smoke ok"}]}'
 ```
+
+This command verifies live credentials and upstream availability; the deterministic built-proxy smoke verifies CLIProxyAPI model listing, client authentication, alias routing, chat, SSE, tools, multimodal payloads, invalid-key redaction, and the separate local route.

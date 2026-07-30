@@ -721,10 +721,34 @@ func resolveXAIAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalcon
 }
 
 func resolveOllamaCloudAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.OllamaCloudKey {
-	if cfg == nil {
+	if cfg == nil || auth == nil {
 		return nil
 	}
-	return resolveAPIKeyConfig(cfg.OllamaCloudKey, auth)
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	var keyMatch *internalconfig.OllamaCloudKey
+	keyMatches := 0
+	for i := range cfg.OllamaCloudKey {
+		entry := &cfg.OllamaCloudKey[i]
+		if !strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+			continue
+		}
+		keyMatch = entry
+		keyMatches++
+		if attrBase != "" && strings.EqualFold(
+			internalconfig.NormalizeOllamaCloudBaseURL(entry.BaseURL),
+			internalconfig.NormalizeOllamaCloudBaseURL(attrBase),
+		) {
+			return entry
+		}
+	}
+	if keyMatches == 1 {
+		return keyMatch
+	}
+	return nil
 }
 
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {

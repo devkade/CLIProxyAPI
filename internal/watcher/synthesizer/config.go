@@ -266,10 +266,7 @@ func (s *ConfigSynthesizer) synthesizeOllamaCloud(ctx *SynthesisContext) []*core
 		if key == "" {
 			continue
 		}
-		baseURL := strings.TrimSpace(entry.BaseURL)
-		if baseURL == "" {
-			baseURL = config.DefaultOllamaCloudBaseURL
-		}
+		baseURL := config.NormalizeOllamaCloudBaseURL(entry.BaseURL)
 		id, token := ctx.IDGenerator.Next("ollama-cloud:apikey", key, baseURL)
 		attrs := map[string]string{
 			"source":   fmt.Sprintf("config:ollama-cloud[%s]", token),
