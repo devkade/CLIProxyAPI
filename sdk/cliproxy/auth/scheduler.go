@@ -35,6 +35,7 @@ const (
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
 	mu                  sync.Mutex
+	clock               Clock
 	strategy            schedulerStrategy
 	providers           map[string]*providerScheduler
 	authProviders       map[string]string
@@ -146,8 +147,12 @@ func normalizeCursor(cursor, size int) int {
 }
 
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
-func newAuthScheduler(selector Selector) *authScheduler {
+func newAuthScheduler(selector Selector, clock Clock) *authScheduler {
+	if clock == nil {
+		clock = systemClock{}
+	}
 	return &authScheduler{
+		clock:               clock,
 		strategy:            selectorStrategy(selector),
 		providers:           make(map[string]*providerScheduler),
 		authProviders:       make(map[string]string),
@@ -193,7 +198,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	s.authProviders = make(map[string]string)
 	s.mixedCursors = make(map[string]int)
 	s.mixedWeightedStates = make(map[string]*smoothWeightedState)
-	now := time.Now()
+	now := s.clock.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
 	}
@@ -206,7 +211,7 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.upsertAuthLocked(auth, time.Now())
+	s.upsertAuthLocked(auth, s.clock.Now())
 }
 
 // removeAuth deletes one auth from every scheduler shard that references it.
@@ -247,15 +252,16 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	shard := providerState.ensureModelLocked(modelKey, time.Now())
+	now := s.clock.Now()
+	shard := providerState.ensureModelLocked(modelKey, now)
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, now); picked != nil {
 		return picked, nil
 	}
-	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+	return nil, shard.unavailableErrorLocked(provider, model, predicate, now)
 }
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
@@ -311,19 +317,20 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		now := s.clock.Now()
+		shard := providerState.ensureModelLocked(modelKey, now)
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, now); picked != nil {
 			return picked, providerKey, nil
 		}
-		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
+		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate, now)
 	}
 
 	predicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
-	now := time.Now()
+	now := s.clock.Now()
 	for providerIndex, providerKey := range normalized {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -344,7 +351,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if !hasCandidate {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 	}
 
 	if strategy == schedulerStrategyFillFirst {
@@ -358,7 +365,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 				return picked, providerKey, nil
 			}
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
@@ -395,7 +402,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 	}
 
 	weights := make([]int, len(normalized))
@@ -411,7 +418,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 	}
 
 	startSlot := s.mixedCursors[cursorKey] % totalWeight
@@ -426,7 +433,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 	}
 
 	slot := startSlot
@@ -450,12 +457,11 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate, now)
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
-func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool) error {
-	now := time.Now()
+func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool, now time.Time) error {
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
@@ -784,11 +790,11 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, now time.Time) *Auth {
 	if m == nil {
 		return nil
 	}
-	m.promoteExpiredLocked(time.Now())
+	m.promoteExpiredLocked(now)
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
@@ -878,8 +884,7 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
-func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
-	now := time.Now()
+func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool, now time.Time) error {
 	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}

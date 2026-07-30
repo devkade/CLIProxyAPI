@@ -126,7 +126,7 @@ func (s *trackingSelector) Pick(ctx context.Context, provider, model string, opt
 }
 
 func newSchedulerForTest(selector Selector, auths ...*Auth) *authScheduler {
-	scheduler := newAuthScheduler(selector)
+	scheduler := newAuthScheduler(selector, systemClock{})
 	scheduler.rebuild(auths)
 	return scheduler
 }

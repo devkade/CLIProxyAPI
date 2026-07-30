@@ -205,6 +205,6 @@ func NewManagerWithClock(store Store, selector Selector, hook Hook, clock Clock)
 	if errInFlightConfig == nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
-	manager.scheduler = newAuthScheduler(selector)
+	manager.scheduler = newAuthScheduler(selector, clock)
 	return manager
 }

@@ -1124,6 +1124,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
+	m.recoverExpiredCooldowns(ctx, []string{provider}, model)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	if strings.TrimSpace(model) != "" {
 		m.mu.RLock()
@@ -1284,6 +1285,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
+	m.recoverExpiredCooldowns(ctx, providers, model)
 
 	eligibleProviders := make([]string, 0, len(providers))
 	seenProviders := make(map[string]struct{}, len(providers))

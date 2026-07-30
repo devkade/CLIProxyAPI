@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 type fixedClock struct {
@@ -15,6 +16,105 @@ type fixedClock struct {
 }
 
 func (c *fixedClock) Now() time.Time { return c.now }
+
+type cooldownExecuteRecorder struct {
+	schedulerTestExecutor
+	mu      sync.Mutex
+	authIDs []string
+}
+
+func (e *cooldownExecuteRecorder) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.authIDs = append(e.authIDs, auth.ID)
+	e.mu.Unlock()
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *cooldownExecuteRecorder) calls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+type cooldownRecoveryLogHook struct {
+	mu      sync.Mutex
+	authIDs []string
+}
+
+func (h *cooldownRecoveryLogHook) Levels() []log.Level { return log.AllLevels }
+
+func (h *cooldownRecoveryLogHook) Fire(entry *log.Entry) error {
+	if entry.Message != "account cooldown recovered" {
+		return nil
+	}
+	authID, _ := entry.Data["auth_id"].(string)
+	h.mu.Lock()
+	h.authIDs = append(h.authIDs, authID)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *cooldownRecoveryLogHook) recoveries(authID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for _, recoveredAuthID := range h.authIDs {
+		if recoveredAuthID == authID {
+			count++
+		}
+	}
+	return count
+}
+
+func TestAccountCooldownSchedulerFastPathUsesManagerClockAndEmitsOneNaturalRecovery(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	clock := &fixedClock{now: time.Date(2035, time.July, 29, 12, 0, 0, 0, time.UTC)}
+	manager := NewManagerWithClock(nil, &RoundRobinSelector{}, nil, clock)
+	executor := &cooldownExecuteRecorder{schedulerTestExecutor: schedulerTestExecutor{provider: "codex"}}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "scheduler-natural-recovery", Provider: "codex"}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+
+	recoveryLogs := &cooldownRecoveryLogHook{}
+	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	log.AddHook(recoveryLogs)
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(previousHooks) })
+
+	retryAfter := time.Minute
+	manager.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		RetryAfter: &retryAfter,
+	})
+
+	req := cliproxyexecutor.Request{}
+	if _, errExecute := manager.Execute(context.Background(), []string{auth.Provider}, req, cliproxyexecutor.Options{}); errExecute == nil {
+		t.Fatal("Execute before cooldown expiry returned nil error")
+	}
+	if calls := executor.calls(); len(calls) != 0 {
+		t.Fatalf("executor calls before expiry = %v, want none", calls)
+	}
+	if got := recoveryLogs.recoveries(auth.ID); got != 0 {
+		t.Fatalf("recovery events before expiry = %d, want 0", got)
+	}
+
+	clock.now = clock.now.Add(retryAfter)
+	if _, errExecute := manager.Execute(context.Background(), []string{auth.Provider}, req, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("Execute at fake-clock expiry returned error: %v", errExecute)
+	}
+	if _, errExecute := manager.Execute(context.Background(), []string{auth.Provider}, req, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("second Execute after fake-clock expiry returned error: %v", errExecute)
+	}
+	if calls := executor.calls(); len(calls) != 2 || calls[0] != auth.ID || calls[1] != auth.ID {
+		t.Fatalf("executor calls after expiry = %v, want [%s %s]", calls, auth.ID, auth.ID)
+	}
+	if got := recoveryLogs.recoveries(auth.ID); got != 1 {
+		t.Fatalf("natural-expiry recovery events = %d, want exactly 1", got)
+	}
+}
 
 func TestAccountCooldownHonorsRetryAfterAndMaximum(t *testing.T) {
 	withQuotaCooldownEnabled(t)

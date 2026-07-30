@@ -422,6 +422,113 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	return changed
 }
 
+type cooldownRecovery struct {
+	auth     *Auth
+	model    string
+	provider string
+}
+
+func cooldownDeadlineExpired(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) bool {
+	if !unavailable && !quotaExceeded {
+		return false
+	}
+	hasDeadline := !nextRetryAfter.IsZero() || !nextRecoverAt.IsZero()
+	return hasDeadline && !nextRetryAfter.After(now) && !nextRecoverAt.After(now)
+}
+
+func clearExpiredCooldownForModel(auth *Auth, model string, now time.Time) (bool, string) {
+	if auth == nil {
+		return false, ""
+	}
+	model = strings.TrimSpace(model)
+	if model != "" && len(auth.ModelStates) > 0 {
+		stateModel := model
+		state := auth.ModelStates[stateModel]
+		if state == nil {
+			stateModel = canonicalModelKey(model)
+			state = auth.ModelStates[stateModel]
+		}
+		if state == nil || state.Status == StatusDisabled || !cooldownDeadlineExpired(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now) {
+			return false, ""
+		}
+		resetModelState(state, now)
+		updateAggregatedAvailability(auth, now)
+		if !hasModelError(auth, now) {
+			auth.LastError = nil
+			auth.StatusMessage = ""
+			auth.Status = StatusActive
+		}
+		auth.UpdatedAt = now
+		return true, stateModel
+	}
+	if !cooldownDeadlineExpired(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now) {
+		return false, ""
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.LastError = nil
+	auth.StatusMessage = ""
+	if !auth.Disabled && auth.Status != StatusDisabled {
+		auth.Status = StatusActive
+	}
+	auth.UpdatedAt = now
+	return true, model
+}
+
+func (m *Manager) recoverExpiredCooldowns(ctx context.Context, providers []string, model string) {
+	if m == nil {
+		return
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		if provider = strings.ToLower(strings.TrimSpace(provider)); provider != "" {
+			providerSet[provider] = struct{}{}
+		}
+	}
+	if len(providerSet) == 0 {
+		return
+	}
+
+	now := m.clock.Now()
+	recoveries := make([]cooldownRecovery, 0)
+	m.mu.Lock()
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		provider := executorKeyFromAuth(auth)
+		if _, ok := providerSet[provider]; !ok {
+			continue
+		}
+		recovered, recoveredModel := clearExpiredCooldownForModel(auth, model, now)
+		if !recovered {
+			continue
+		}
+		_ = m.persist(ctx, auth)
+		recoveries = append(recoveries, cooldownRecovery{auth: auth.Clone(), model: recoveredModel, provider: auth.Provider})
+	}
+	m.mu.Unlock()
+
+	for _, recovery := range recoveries {
+		if recovery.model != "" {
+			registry.GetGlobalRegistry().ClearModelQuotaExceeded(recovery.auth.ID, recovery.model)
+			registry.GetGlobalRegistry().ResumeClientModel(recovery.auth.ID, recovery.model)
+		}
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(recovery.auth)
+		}
+		logEntryWithRequestID(ctx).
+			WithField("auth_id", recovery.auth.ID).
+			WithField("provider", recovery.provider).
+			WithField("model", recovery.model).
+			Info("account cooldown recovered")
+	}
+	if len(recoveries) > 0 {
+		m.persistCooldownStates(context.Background())
+	}
+}
+
 func dedupeStrings(values []string) []string {
 	if len(values) < 2 {
 		return values
