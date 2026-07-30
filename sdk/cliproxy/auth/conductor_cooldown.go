@@ -888,6 +888,14 @@ func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth
 	m.reportHomeResult(ctx, result, auth)
 }
 
+func (m *Manager) recordClassifiedExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral, availabilityNeutral bool) {
+	if availabilityNeutral && !ephemeral {
+		m.recordAvailabilityNeutralResult(ctx, result)
+		return
+	}
+	m.recordExecutionResult(ctx, result, auth, ephemeral)
+}
+
 // reportHomeResult only observes a Home dispatch result and never updates local auth state.
 func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Auth) {
 	if m == nil || result.AuthID == "" {

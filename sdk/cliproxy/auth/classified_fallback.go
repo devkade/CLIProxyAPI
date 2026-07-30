@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -33,13 +35,12 @@ func newClassifiedModelFallbackTracker() *classifiedModelFallbackTracker {
 	return &classifiedModelFallbackTracker{remaining: maxClassifiedModelFallbacks}
 }
 
-func (t *classifiedModelFallbackTracker) evaluate(auth *Auth, provider, fromModel string, remainingModels []string, err error) (bool, error) {
+func (t *classifiedModelFallbackTracker) evaluate(classification modelFallbackClassification, provider, fromModel string, remainingModels []string, err error) (bool, error) {
 	if t == nil || err == nil {
 		return false, nil
 	}
-	classification := classifyModelFallbackError(auth, provider, err)
 	if !classification.Eligible {
-		if t.originalErr != nil {
+		if t.originalErr != nil && len(remainingModels) == 0 {
 			t.logExhausted(provider, fromModel)
 			return false, t.originalErr
 		}
@@ -87,51 +88,80 @@ func (t *classifiedModelFallbackTracker) logExhausted(provider, model string) {
 	}).Warn("classified model fallback exhausted")
 }
 
+type structuredProviderError struct {
+	Code    string `json:"code"`
+	Type    string `json:"type"`
+	Param   string `json:"param"`
+	Field   string `json:"field"`
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+type structuredProviderErrorEnvelope struct {
+	Error json.RawMessage `json:"error"`
+	structuredProviderError
+}
+
 func classifyModelFallbackError(auth *Auth, provider string, err error) modelFallbackClassification {
-	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
-		return modelFallbackClassification{}
-	}
-	family := modelFallbackProviderFamily(auth, provider)
-	if family == "" {
+	if err == nil || statusCodeFromError(err) != http.StatusBadRequest || modelFallbackProviderFamily(auth, provider) == "" {
 		return modelFallbackClassification{}
 	}
 
-	message := strings.ToLower(err.Error())
-	if containsAny(message,
-		"invalid_api_key", "authentication_error", "authentication_required", "unauthorized",
-		"permission_denied", "permission denied", "insufficient_permission", "forbidden", "access denied",
-	) {
+	detail, ok := parseStructuredProviderError(err)
+	if !ok {
 		return modelFallbackClassification{}
 	}
+	code := normalizeErrorIdentifier(detail.Code)
+	if code == "" {
+		code = normalizeErrorIdentifier(detail.Type)
+	}
+	field := normalizeErrorIdentifier(strings.Join([]string{detail.Param, detail.Field, detail.Path}, " "))
 
-	if containsAny(message,
-		"model_not_supported", "unsupported_model", "model_not_found", "unknown_model", "model_does_not_exist",
-		"requested model is not supported", "requested model is unsupported", "model is not supported",
-		"model not supported", "unsupported model", "model is unavailable", "model unavailable",
-	) || (strings.Contains(message, "model") && containsAny(message, "not available for your plan", "not available for your account")) {
+	switch code {
+	case "model_not_supported", "unsupported_model", "model_not_found", "unknown_model", "model_does_not_exist", "model_does_not_exist_error":
 		return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonModelUnsupported}
-	}
-
-	switch family {
-	case "openai", "claude":
-		if containsAny(message,
-			"does not support tools", "doesn't support tools", "tool use is not supported",
-			"tools are not supported", "function calling is not supported", "does not support function calling",
-		) {
+	case "tools_not_supported", "tool_use_not_supported", "function_calling_not_supported":
+		return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonToolsUnsupported}
+	case "streaming_not_supported", "stream_not_supported":
+		return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonStreamingUnsupported}
+	case "unsupported_feature":
+		switch {
+		case containsAny(field, "tools", "tool_use", "function_call", "functions"):
 			return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonToolsUnsupported}
-		}
-		if containsAny(message,
-			"does not support streaming", "doesn't support streaming", "streaming is not supported",
-			"streaming not supported",
-		) {
+		case containsAny(field, "stream", "streaming"):
 			return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonStreamingUnsupported}
-		}
-	case "gemini":
-		if containsAny(message, "function calling is not supported", "does not support function calling") {
-			return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonToolsUnsupported}
+		case containsAny(field, "model"):
+			return modelFallbackClassification{Eligible: true, Reason: modelFallbackReasonModelUnsupported}
 		}
 	}
 	return modelFallbackClassification{}
+}
+
+func parseStructuredProviderError(err error) (structuredProviderError, bool) {
+	message := err.Error()
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		message = authErr.Message
+	}
+	var envelope structuredProviderErrorEnvelope
+	if json.Unmarshal([]byte(strings.TrimSpace(message)), &envelope) != nil {
+		return structuredProviderError{}, false
+	}
+	detail := envelope.structuredProviderError
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		if json.Unmarshal(envelope.Error, &detail) != nil {
+			return structuredProviderError{}, false
+		}
+	}
+	if strings.TrimSpace(detail.Code) == "" && strings.TrimSpace(detail.Type) == "" {
+		return structuredProviderError{}, false
+	}
+	return detail, true
+}
+
+func normalizeErrorIdentifier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.NewReplacer("-", "_", " ", "_", ".", "_", "/", "_").Replace(value)
 }
 
 func modelFallbackProviderFamily(auth *Auth, provider string) string {

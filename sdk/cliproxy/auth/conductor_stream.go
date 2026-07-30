@@ -229,8 +229,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
-			retryFallback, terminalErr := fallbacks.evaluate(auth, provider, execModel, execModels[idx+1:], errStream)
+			classification := classifyModelFallbackError(auth, provider, errStream)
+			m.recordClassifiedExecutionResult(ctx, result, auth, ephemeralResult, classification.Eligible || isRequestInvalidError(errStream))
+			retryFallback, terminalErr := fallbacks.evaluate(classification, provider, execModel, execModels[idx+1:], errStream)
 			if terminalErr != nil {
 				return nil, terminalErr
 			}
@@ -273,9 +274,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(bootstrapErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			classification := classifyModelFallbackError(auth, provider, bootstrapErr)
+			m.recordClassifiedExecutionResult(ctx, result, auth, ephemeralResult, classification.Eligible || isRequestInvalidError(bootstrapErr))
 			discardStreamChunks(streamResult.Chunks)
-			retryFallback, terminalErr := fallbacks.evaluate(auth, provider, execModel, execModels[idx+1:], bootstrapErr)
+			retryFallback, terminalErr := fallbacks.evaluate(classification, provider, execModel, execModels[idx+1:], bootstrapErr)
 			if terminalErr != nil {
 				return nil, terminalErr
 			}

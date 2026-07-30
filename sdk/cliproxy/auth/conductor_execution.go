@@ -353,8 +353,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
-				retryFallback, terminalErr := fallbacks.evaluate(auth, provider, upstreamModel, models[modelIndex+1:], errExec)
+				classification := classifyModelFallbackError(auth, provider, errExec)
+				if classification.Eligible || isRequestInvalidError(errExec) {
+					m.recordAvailabilityNeutralResult(execCtx, result)
+				} else {
+					m.MarkResult(execCtx, result)
+				}
+				retryFallback, terminalErr := fallbacks.evaluate(classification, provider, upstreamModel, models[modelIndex+1:], errExec)
 				if terminalErr != nil {
 					return cliproxyexecutor.Response{}, terminalErr
 				}
@@ -482,12 +487,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
 				// that remains usable through the messages endpoint.
-				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
+				classification := classifyModelFallbackError(auth, provider, errExec)
+				if classification.Eligible || isRequestInvalidError(errExec) || isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
 				}
-				retryFallback, terminalErr := fallbacks.evaluate(auth, provider, upstreamModel, models[modelIndex+1:], errExec)
+				retryFallback, terminalErr := fallbacks.evaluate(classification, provider, upstreamModel, models[modelIndex+1:], errExec)
 				if terminalErr != nil {
 					return cliproxyexecutor.Response{}, terminalErr
 				}

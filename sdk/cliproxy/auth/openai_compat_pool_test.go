@@ -428,12 +428,68 @@ func TestManagerExecute_OpenAICompatAliasPoolClassifiedFallbackIsBoundedAndPrese
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolClassifiedFallbackPreservesLaterTransientRetry(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{
+		id: openAICompatPoolProviderKey,
+		executeErrors: map[string]error{
+			"model-a": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"model_not_supported","type":"invalid_request_error","param":"model","message":"model is not supported"}}`},
+			"model-b": &Error{HTTPStatus: http.StatusInternalServerError, Message: `{"error":{"code":"server_error","type":"server_error"}}`},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "model-a", Alias: alias},
+		{Name: "model-b", Alias: alias},
+		{Name: "model-c", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want success after transient retry", err)
+	}
+	if string(resp.Payload) != "model-c" {
+		t.Fatalf("payload = %q, want model-c", resp.Payload)
+	}
+	want := []string{"model-a", "model-b", "model-c"}
+	if got := executor.ExecuteModels(); !slices.Equal(got, want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolMalformedErrorTextIsTerminalAndAvailabilityNeutral(t *testing.T) {
+	alias := "claude-opus-4.66"
+	malformedErr := &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"invalid_request","type":"invalid_request_error","param":"messages","message":"messages must not contain the text unknown_model"}}`}
+	executor := &openAICompatPoolExecutor{
+		id:            openAICompatPoolProviderKey,
+		executeErrors: map[string]error{"model-a": malformedErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "model-a", Alias: alias},
+		{Name: "model-b", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != malformedErr {
+		t.Fatalf("execute error = %v, want malformed request error", err)
+	}
+	if got := executor.ExecuteModels(); !slices.Equal(got, []string{"model-a"}) {
+		t.Fatalf("execute calls = %v, want only malformed candidate", got)
+	}
+	updated, ok := m.GetByID("pool-auth-" + t.Name())
+	if !ok || updated == nil {
+		t.Fatal("expected auth to remain registered")
+	}
+	if state := updated.ModelStates["model-a"]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("malformed request changed model availability: %+v", state)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolFallsBackWhenToolsUnsupported(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
 		id: openAICompatPoolProviderKey,
 		executeErrors: map[string]error{
-			"deepseek-v3.1": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"unsupported_feature","message":"This model does not support tools"}}`},
+			"deepseek-v3.1": &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"unsupported_feature","type":"invalid_request_error","param":"tools","message":"This model does not support tools"}}`},
 		},
 	}
 	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
@@ -457,7 +513,7 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportBadRequest(t
 	alias := "claude-opus-4.66"
 	modelSupportErr := &Error{
 		HTTPStatus: http.StatusBadRequest,
-		Message:    "invalid_request_error: The requested model is not supported.",
+		Message:    `{"error":{"code":"model_not_supported","type":"invalid_request_error","param":"model","message":"The requested model is not supported."}}`,
 	}
 	executor := &openAICompatPoolExecutor{
 		id:            openAICompatPoolProviderKey,
@@ -490,12 +546,8 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportBadRequest(t
 	if !ok || updated == nil {
 		t.Fatalf("expected auth to remain registered")
 	}
-	state := updated.ModelStates["deepseek-v3.1"]
-	if state == nil {
-		t.Fatalf("expected suspended upstream model state")
-	}
-	if !state.Unavailable || state.NextRetryAfter.IsZero() {
-		t.Fatalf("expected upstream model suspension, got %+v", state)
+	if state := updated.ModelStates["deepseek-v3.1"]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("classified fallback changed model availability: %+v", state)
 	}
 }
 
@@ -680,11 +732,11 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidRequest(t *test
 	}
 }
 
-func TestManagerExecute_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterRequests(t *testing.T) {
+func TestManagerExecute_OpenAICompatAliasPoolClassifiedFallbackRemainsAvailabilityNeutral(t *testing.T) {
 	alias := "claude-opus-4.66"
 	modelSupportErr := &Error{
 		HTTPStatus: http.StatusBadRequest,
-		Message:    "invalid_request_error: The requested model is not supported.",
+		Message:    `{"error":{"code":"model_not_supported","type":"invalid_request_error","param":"model","message":"The requested model is not supported."}}`,
 	}
 	executor := &openAICompatPoolExecutor{
 		id:            openAICompatPoolProviderKey,
@@ -706,7 +758,7 @@ func TestManagerExecute_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterReques
 	}
 
 	got := executor.ExecuteModels()
-	want := []string{"deepseek-v3.1", "glm-5", "glm-5", "glm-5"}
+	want := []string{"deepseek-v3.1", "glm-5", "glm-5", "deepseek-v3.1", "glm-5"}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
@@ -784,11 +836,11 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 	}
 }
 
-func TestManagerExecuteCount_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterRequests(t *testing.T) {
+func TestManagerExecuteCount_OpenAICompatAliasPoolClassifiedFallbackRemainsAvailabilityNeutral(t *testing.T) {
 	alias := "claude-opus-4.66"
 	modelSupportErr := &Error{
 		HTTPStatus: http.StatusBadRequest,
-		Message:    "invalid_request_error: The requested model is unsupported.",
+		Message:    `{"error":{"code":"model_not_supported","type":"invalid_request_error","param":"model","message":"The requested model is unsupported."}}`,
 	}
 	executor := &openAICompatPoolExecutor{
 		id:          openAICompatPoolProviderKey,
@@ -810,7 +862,7 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterR
 	}
 
 	got := executor.CountModels()
-	want := []string{"deepseek-v3.1", "glm-5", "glm-5", "glm-5"}
+	want := []string{"deepseek-v3.1", "glm-5", "glm-5", "deepseek-v3.1", "glm-5"}
 	if len(got) != len(want) {
 		t.Fatalf("count calls = %v, want %v", got, want)
 	}

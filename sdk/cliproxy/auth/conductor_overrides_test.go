@@ -403,14 +403,14 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	}
 }
 
-func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
+func TestManager_ModelSupportBadRequest_FallsBackAvailabilityNeutral(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
 		id: "claude",
 		executeErrors: map[string]error{
 			"aa-bad-auth": &Error{
 				HTTPStatus: http.StatusBadRequest,
-				Message:    "invalid_request_error: The requested model is not supported.",
+				Message:    `{"error":{"code":"model_not_supported","type":"invalid_request_error","param":"model","message":"The requested model is not supported."}}`,
 			},
 		},
 	}
@@ -447,7 +447,7 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 
 	got := executor.ExecuteCalls()
-	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	want := []string{badAuth.ID, goodAuth.ID, badAuth.ID, goodAuth.ID}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
@@ -461,15 +461,8 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	if !ok || updatedBad == nil {
 		t.Fatalf("expected bad auth to remain registered")
 	}
-	state := updatedBad.ModelStates[model]
-	if state == nil {
-		t.Fatalf("expected model state for %q", model)
-	}
-	if !state.Unavailable {
-		t.Fatalf("expected bad auth model state to be unavailable")
-	}
-	if state.NextRetryAfter.IsZero() {
-		t.Fatalf("expected bad auth model state cooldown to be set")
+	if state := updatedBad.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("classified fallback changed model availability: %+v", state)
 	}
 }
 
