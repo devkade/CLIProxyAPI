@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// MaxHealthSeries is the hard upper bound for distinct request metric series.
-// One additional aggregate series retains requests that exceed this limit.
+// MaxHealthSeries is the hard upper bound for request metric series, including
+// the aggregate overflow series.
 const MaxHealthSeries = 1024
 
 const accountBucketCount = 64
@@ -87,7 +87,7 @@ func (m *HealthMetrics) HandleUsage(_ context.Context, record Record) {
 	m.mu.Lock()
 	series := m.series[key]
 	if series == nil {
-		if len(m.series) >= MaxHealthSeries {
+		if len(m.series) >= MaxHealthSeries-1 {
 			m.overflowedRequests++
 			series = &m.overflow
 			if series.Provider == "" {
@@ -163,19 +163,14 @@ func durationMilliseconds(duration time.Duration) uint64 {
 
 func normalizeProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
+	switch provider {
+	case "openai", "gemini", "gemini-interactions", "vertex", "aistudio", "claude", "codex", "antigravity", "xai", "kimi", "qwen", "iflow", "openai-compatibility", "ollama-cloud":
+		return provider
+	case "":
 		return "unknown"
-	}
-	if len(provider) > 64 {
+	default:
 		return "other"
 	}
-	for _, char := range provider {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || strings.ContainsRune("-_.", char) {
-			continue
-		}
-		return "other"
-	}
-	return provider
 }
 
 func normalizeProtocol(protocol string) string {

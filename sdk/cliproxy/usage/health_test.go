@@ -67,8 +67,8 @@ func TestHealthMetricsBoundsCardinalityDuringConcurrentUpdates(t *testing.T) {
 	wg.Wait()
 
 	snapshot := metrics.Snapshot()
-	if len(snapshot.Series) > MaxHealthSeries+1 {
-		t.Fatalf("series = %d, exceeds bounded maximum %d plus overflow", len(snapshot.Series), MaxHealthSeries)
+	if len(snapshot.Series) > MaxHealthSeries {
+		t.Fatalf("series = %d, exceeds strict bounded maximum %d including overflow", len(snapshot.Series), MaxHealthSeries)
 	}
 	var requests uint64
 	for _, series := range snapshot.Series {
@@ -79,6 +79,25 @@ func TestHealthMetricsBoundsCardinalityDuringConcurrentUpdates(t *testing.T) {
 	}
 	if snapshot.OverflowedRequests == 0 {
 		t.Fatal("overflowed_requests = 0, want bounded overflow accounting")
+	}
+}
+
+func TestHealthMetricsNormalizesProviderToExplicitAllowlist(t *testing.T) {
+	tests := map[string]string{
+		"attacker-chosen-provider-label":               "other",
+		"openai-compatible-adversarial-provider-label": "other",
+		" ollama-cloud ":                               "ollama-cloud",
+		"":                                             "unknown",
+	}
+	for provider, want := range tests {
+		t.Run(provider, func(t *testing.T) {
+			metrics := NewHealthMetrics()
+			metrics.HandleUsage(context.Background(), Record{Provider: provider})
+			snapshot := metrics.Snapshot()
+			if len(snapshot.Series) != 1 || snapshot.Series[0].Provider != want {
+				t.Fatalf("provider series = %#v, want provider %q", snapshot.Series, want)
+			}
+		})
 	}
 }
 
