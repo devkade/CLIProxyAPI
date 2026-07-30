@@ -102,7 +102,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
 		body = ensureXAINativeXSearchTool(body)
 	}
-	body = limitXAITools(ctx, body, xaiMaxTools)
+	body = helps.LimitXAITools(ctx, body, helps.XAIMaxTools)
 	body = pruneXAIOrphanedToolChoice(body)
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)

@@ -46,6 +46,32 @@ func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatE
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
 }
 
+func (e *OpenAICompatExecutor) providerProfile(auth *cliproxyauth.Auth, model string) helps.ProviderPayloadProfile {
+	profile := helps.ProviderPayloadProfile{ExecutorName: e.provider, Model: model}
+	profile.BaseURL, _ = e.resolveCredentials(auth)
+	if auth != nil {
+		profile.ProviderName = auth.Provider
+		if auth.Attributes != nil {
+			profile.CompatName = auth.Attributes["compat_name"]
+		}
+	}
+	if compat := e.resolveCompatConfig(auth); compat != nil {
+		profile.CompatName = compat.Name
+		if profile.BaseURL == "" {
+			profile.BaseURL = compat.BaseURL
+		}
+	}
+	return profile
+}
+
+func sanitizeOpenAICompatProviderPayload(ctx context.Context, profile helps.ProviderPayloadProfile, body []byte) []byte {
+	body = helps.SanitizeOpenAICompatProviderPayload(ctx, profile, body)
+	if profile.MatchesProvider("xai") {
+		body = sanitizeXAIInputEncryptedContent(body)
+	}
+	return body
+}
+
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
 
