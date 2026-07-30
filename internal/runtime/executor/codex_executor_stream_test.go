@@ -3,8 +3,17 @@ package executor
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type oneByteReader struct {
@@ -18,6 +27,55 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 	p[0] = r.data[0]
 	r.data = r.data[1:]
 	return 1, nil
+}
+
+func TestCodexExecutorExecuteStreamPreservesSSEFrameSeparators(t *testing.T) {
+	upstream := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n" +
+		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"推理\"}\r\n\r\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"city\\\":\\\"北京\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.output_text.done\",\"text\":\"完成\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\r\n\r\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, b := range upstream {
+			_, _ = w.Write([]byte{b})
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	executor := NewCodexExecutor(&config.Config{})
+	result, err := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var downstream []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error = %v", chunk.Err)
+		}
+		downstream = append(downstream, chunk.Payload...)
+	}
+	if got, want := bytes.Count(downstream, []byte("\n\n"))+bytes.Count(downstream, []byte("\r\n\r\n")), 6; got != want {
+		t.Fatalf("downstream delimiter count = %d, want %d; downstream=%q", got, want, downstream)
+	}
+	if !bytes.Equal(downstream, upstream) {
+		t.Fatalf("downstream bytes differ\n got: %q\nwant: %q", downstream, upstream)
+	}
 }
 
 func TestReadCodexSSELinePreservesFrameBoundariesAcrossOneByteFragmentation(t *testing.T) {

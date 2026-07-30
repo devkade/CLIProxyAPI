@@ -12,7 +12,7 @@ import (
 
 func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
-		rawJSON = bytes.TrimSpace(rawJSON[5:])
+		rawJSON = bytes.TrimLeft(rawJSON[5:], " \t")
 		out := make([]byte, 0, len(rawJSON)+len("data: "))
 		out = append(out, []byte("data: ")...)
 		out = append(out, rawJSON...)

@@ -148,13 +148,23 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			line = applyCodexIdentityConfuseResponsePayload(line, identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n")) {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(line)}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
 			translatedLine := bytes.Clone(line)
+			lineEnding := codexSSELineEnding(line)
 			terminalSuccess := false
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				translatedLine = append([]byte("data: "), data...)
+				translatedLine = append(translatedLine, lineEnding...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -188,6 +198,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					}
 					translatedLine = append([]byte("data: "), data...)
+					translatedLine = append(translatedLine, lineEnding...)
 				}
 			}
 
@@ -201,6 +212,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 			if terminalSuccess {
+				if separator := readCodexSSESeparator(reader); len(separator) > 0 {
+					separator = applyCodexIdentityConfuseResponsePayload(separator, identityState)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, separator)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(separator)}:
+					case <-ctx.Done():
+						return
+					}
+				}
 				return
 			}
 		}
@@ -230,4 +250,34 @@ func readCodexSSELine(reader *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return nil, nil
+}
+
+func codexSSELineEnding(line []byte) []byte {
+	if bytes.HasSuffix(line, []byte("\r\n")) {
+		return line[len(line)-2:]
+	}
+	if bytes.HasSuffix(line, []byte("\n")) {
+		return line[len(line)-1:]
+	}
+	return nil
+}
+
+func readCodexSSESeparator(reader *bufio.Reader) []byte {
+	next, err := reader.Peek(1)
+	if err != nil {
+		return nil
+	}
+	if next[0] == '\n' {
+		_, _ = reader.Discard(1)
+		return []byte("\n")
+	}
+	if next[0] != '\r' {
+		return nil
+	}
+	next, err = reader.Peek(2)
+	if err != nil || !bytes.Equal(next, []byte("\r\n")) {
+		return nil
+	}
+	_, _ = reader.Discard(2)
+	return []byte("\r\n")
 }
