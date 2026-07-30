@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -37,6 +38,42 @@ func TestOllamaCloudConfigMatchingUsesKeyAndNormalizedBase(t *testing.T) {
 				t.Fatalf("resolved entry = %#v, want model %q", entry, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestOllamaCloudAliasResolvesAllConfiguredCandidates(t *testing.T) {
+	const alias = "cloud-alias"
+	cfg := &internalconfig.Config{OllamaCloudKey: []internalconfig.OllamaCloudKey{{
+		APIKey: "test-key",
+		Models: []internalconfig.OllamaCloudModel{
+			{Name: "candidate-a", Alias: alias},
+			{Name: "candidate-b", Alias: alias},
+		},
+	}}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auth := &Auth{
+		ID:       "ollama-cloud:test",
+		Provider: "ollama-cloud",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": internalconfig.DefaultOllamaCloudBaseURL,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	got, _, _ := manager.executionModelCandidatesWithAlias(auth, alias)
+	want := []string{"candidate-a", "candidate-b"}
+	if len(got) != len(want) {
+		t.Fatalf("execution candidates = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execution candidate %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

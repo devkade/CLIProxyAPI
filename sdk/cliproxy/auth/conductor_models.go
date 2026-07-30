@@ -77,7 +77,7 @@ func openAICompatProviderKey(auth *Auth) string {
 	return util.OpenAICompatibleProviderKey(auth.Provider)
 }
 
-func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
+func apiKeyModelPoolKey(auth *Auth, requestedModel string) string {
 	base := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
 	if base == "" {
 		base = strings.TrimSpace(requestedModel)
@@ -125,8 +125,8 @@ func rotateStrings(values []string, offset int) []string {
 	return out
 }
 
-func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedModel string) []string {
-	if m == nil || !isOpenAICompatAPIKeyAuth(auth) {
+func (m *Manager) resolveAPIKeyUpstreamModelPool(auth *Auth, requestedModel string) []string {
+	if m == nil || !isAPIKeyAuth(auth) {
 		return nil
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
@@ -136,6 +136,16 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "ollama-cloud") {
+		entry := resolveOllamaCloudAPIKeyConfig(cfg, auth)
+		if entry == nil {
+			return nil
+		}
+		return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+	}
+	if !isOpenAICompatAPIKeyAuth(auth) {
+		return nil
 	}
 	providerKey := ""
 	compatName := ""
@@ -162,11 +172,11 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.nextModelPoolOffset(apiKeyModelPoolKey(auth, requestedModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
@@ -264,11 +274,11 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	if len(candidates) == 0 {
-		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
+		if pool := m.resolveAPIKeyUpstreamModelPool(auth, upstreamModel); len(pool) > 0 {
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
+				offset := m.nextModelPoolOffset(apiKeyModelPoolKey(auth, upstreamModel), len(pool))
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
