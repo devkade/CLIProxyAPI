@@ -65,7 +65,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
-	protocol, retry, fallback := usage.ObserveHealthAttempt(ctx, provider)
+	protocol, retry, fallback := usage.ObserveHealthAttempt(ctx, provider, model)
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,

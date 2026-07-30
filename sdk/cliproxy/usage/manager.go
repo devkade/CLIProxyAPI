@@ -88,6 +88,7 @@ type healthRequestContext struct {
 	protocol      string
 	attempts      uint64
 	firstProvider string
+	firstModel    string
 }
 
 // WithHealthRequest starts shared per-request health tracking. Repeated calls
@@ -104,7 +105,7 @@ func WithHealthRequest(ctx context.Context, protocol string) context.Context {
 
 // ObserveHealthAttempt returns sanitized dimensions for the next upstream attempt.
 // It stores no credential, prompt, response, or error content.
-func ObserveHealthAttempt(ctx context.Context, provider string) (protocol string, retry, fallback bool) {
+func ObserveHealthAttempt(ctx context.Context, provider, model string) (protocol string, retry, fallback bool) {
 	if ctx == nil {
 		return "", false, false
 	}
@@ -113,12 +114,14 @@ func ObserveHealthAttempt(ctx context.Context, provider string) (protocol string
 		return "", false, false
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
 	request.mu.Lock()
 	protocol = request.protocol
 	retry = request.attempts > 0
-	fallback = request.firstProvider != "" && provider != "" && provider != request.firstProvider
-	if request.firstProvider == "" {
+	fallback = retry && (provider != request.firstProvider || model != request.firstModel)
+	if request.attempts == 0 {
 		request.firstProvider = provider
+		request.firstModel = model
 	}
 	request.attempts++
 	request.mu.Unlock()

@@ -126,7 +126,7 @@ func buildAccountHealthSeries(auths []*coreauth.Auth, now time.Time) []accountHe
 		return out
 	}
 	overflow := accountHealthSeries{Provider: "overflow", AccountBucket: "overflow"}
-	for _, series := range out[maxAccountHealthSeries:] {
+	for _, series := range out[maxAccountHealthSeries-1:] {
 		overflow.Total += series.Total
 		overflow.Active += series.Active
 		overflow.Cooldown += series.Cooldown
@@ -134,13 +134,13 @@ func buildAccountHealthSeries(auths []*coreauth.Auth, now time.Time) []accountHe
 		overflow.Error += series.Error
 		overflow.ModelCooldowns += series.ModelCooldowns
 	}
-	return append(out[:maxAccountHealthSeries], overflow)
+	return append(out[:maxAccountHealthSeries-1], overflow)
 }
 
 func accountHealthProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
-	case "gemini", "vertex", "aistudio", "claude", "codex", "antigravity", "xai", "kimi", "qwen", "iflow", "openai-compatibility":
+	case "gemini", "vertex", "aistudio", "claude", "codex", "antigravity", "xai", "kimi", "qwen", "iflow", "openai-compatibility", "ollama-cloud":
 		return provider
 	case "":
 		return "unknown"

@@ -82,19 +82,23 @@ func TestHealthMetricsBoundsCardinalityDuringConcurrentUpdates(t *testing.T) {
 	}
 }
 
-func TestHealthRequestTracksRetriesAndProviderFallback(t *testing.T) {
+func TestHealthRequestTracksRetriesAndFallback(t *testing.T) {
 	ctx := WithHealthRequest(context.Background(), "openai-response")
 
-	protocol, retry, fallback := ObserveHealthAttempt(ctx, "claude")
+	protocol, retry, fallback := ObserveHealthAttempt(ctx, "claude", "claude-sonnet")
 	if protocol != "openai-response" || retry || fallback {
 		t.Fatalf("first protocol/retry/fallback = %q/%v/%v", protocol, retry, fallback)
 	}
-	protocol, retry, fallback = ObserveHealthAttempt(ctx, "claude")
+	protocol, retry, fallback = ObserveHealthAttempt(ctx, "claude", "claude-sonnet")
 	if protocol != "openai-response" || !retry || fallback {
 		t.Fatalf("retry protocol/retry/fallback = %q/%v/%v", protocol, retry, fallback)
 	}
-	protocol, retry, fallback = ObserveHealthAttempt(ctx, "gemini")
+	protocol, retry, fallback = ObserveHealthAttempt(ctx, "claude", "claude-opus")
 	if protocol != "openai-response" || !retry || !fallback {
-		t.Fatalf("fallback protocol/retry/fallback = %q/%v/%v", protocol, retry, fallback)
+		t.Fatalf("model fallback protocol/retry/fallback = %q/%v/%v", protocol, retry, fallback)
+	}
+	protocol, retry, fallback = ObserveHealthAttempt(ctx, "gemini", "gemini-pro")
+	if protocol != "openai-response" || !retry || !fallback {
+		t.Fatalf("provider fallback protocol/retry/fallback = %q/%v/%v", protocol, retry, fallback)
 	}
 }

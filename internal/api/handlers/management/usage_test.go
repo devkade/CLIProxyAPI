@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
@@ -111,6 +113,50 @@ func TestGetHealthMetricsIncludesBoundedRedactedAccountCooldowns(t *testing.T) {
 	}
 	if len(payload.Accounts) != 1 || payload.Accounts[0].Provider != "claude" || payload.Accounts[0].Cooldown != 1 || payload.Accounts[0].ModelCooldowns != 1 {
 		t.Fatalf("accounts = %#v, want one claude cooldown", payload.Accounts)
+	}
+}
+
+func TestBuildAccountHealthSeriesReservesOverflowWithinLimit(t *testing.T) {
+	providers := []string{"gemini", "vertex", "aistudio", "claude", "codex"}
+	auths := make([]*coreauth.Auth, 0, maxAccountHealthSeries+1)
+	for _, provider := range providers {
+		buckets := make(map[string]struct{}, 64)
+		for candidate := 0; len(buckets) < 64 && len(auths) < maxAccountHealthSeries+1; candidate++ {
+			id := provider + "-account-" + strconv.Itoa(candidate)
+			bucket := coreusage.AccountBucket(id)
+			if _, exists := buckets[bucket]; exists {
+				continue
+			}
+			buckets[bucket] = struct{}{}
+			auths = append(auths, &coreauth.Auth{ID: id, Provider: provider, Status: coreauth.StatusActive})
+		}
+	}
+	if len(auths) != maxAccountHealthSeries+1 {
+		t.Fatalf("generated account series = %d, want %d", len(auths), maxAccountHealthSeries+1)
+	}
+
+	series := buildAccountHealthSeries(auths, time.Now())
+	if len(series) != maxAccountHealthSeries {
+		t.Fatalf("account series = %d, want strict limit %d", len(series), maxAccountHealthSeries)
+	}
+	var total, overflowTotal int
+	for _, item := range series {
+		total += item.Total
+		if item.Provider == "overflow" && item.AccountBucket == "overflow" {
+			overflowTotal = item.Total
+		}
+	}
+	if total != len(auths) {
+		t.Fatalf("account total = %d, want preserved total %d", total, len(auths))
+	}
+	if overflowTotal != 2 {
+		t.Fatalf("overflow total = %d, want 2 reserved series", overflowTotal)
+	}
+}
+
+func TestAccountHealthProviderPreservesOllamaCloud(t *testing.T) {
+	if got := accountHealthProvider(" ollama-cloud "); got != "ollama-cloud" {
+		t.Fatalf("accountHealthProvider() = %q, want ollama-cloud", got)
 	}
 }
 

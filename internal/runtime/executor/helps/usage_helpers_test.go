@@ -533,13 +533,13 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 func TestUsageReporterBuildRecordIncludesHealthAttemptDimensions(t *testing.T) {
 	ctx := usage.WithHealthRequest(context.Background(), "openai-response")
 	first := NewUsageReporter(ctx, "claude", "claude-sonnet", nil).buildRecord(usage.Detail{}, false)
-	fallback := NewUsageReporter(ctx, "gemini", "gemini-pro", nil).buildRecord(usage.Detail{}, false)
+	fallback := NewUsageReporter(ctx, "claude", "claude-opus", nil).buildRecord(usage.Detail{}, false)
 
 	if first.Protocol != "openai-response" || first.Retry || first.Fallback {
 		t.Fatalf("first protocol/retry/fallback = %q/%v/%v", first.Protocol, first.Retry, first.Fallback)
 	}
 	if fallback.Protocol != "openai-response" || !fallback.Retry || !fallback.Fallback {
-		t.Fatalf("fallback protocol/retry/fallback = %q/%v/%v", fallback.Protocol, fallback.Retry, fallback.Fallback)
+		t.Fatalf("same-provider model fallback protocol/retry/fallback = %q/%v/%v", fallback.Protocol, fallback.Retry, fallback.Fallback)
 	}
 }
 
