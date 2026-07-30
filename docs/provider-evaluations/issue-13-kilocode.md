@@ -4,6 +4,10 @@ Evaluated on 2026-07-29 against Kilo's public service and the official
 `Kilo-Org/kilocode` sources at commit
 [`1b134cef71ee264f98d680358c03a51b4b7d226f`](https://github.com/Kilo-Org/kilocode/tree/1b134cef71ee264f98d680358c03a51b4b7d226f).
 
+**Status:** research and deterministic wiring evidence only. Issue #13 remains open
+because no request authenticated with a valid dashboard-issued Kilo API key was
+performed.
+
 ## Conclusion
 
 **Kilo has a distinct upstream service, Kilo AI Gateway, but it does not need a
@@ -92,10 +96,13 @@ flow. A dedicated CLIProxyAPI login implementation would therefore add token
 and account lifecycle complexity without adding protocol capability.
 
 No paid-account secret was available during this evaluation. Consequently, a
-paid authenticated request was not executed. Authentication was checked from
-the official contract and at the live boundary: a paid-model request without a
-valid credential returned HTTP 401 with `PAID_MODEL_AUTH_REQUIRED`. This gap
-does not justify handling or extracting an existing Kilo client credential.
+request authenticated with a valid dashboard-issued Kilo API key was not
+executed. Authentication was checked from the official contract and at the
+live boundary: a paid-model request without a valid credential returned HTTP
+401 with `PAID_MODEL_AUTH_REQUIRED`. This exact live-auth criterion remains
+unmet; neither the rejection probe nor the deterministic wiring fixture below
+satisfies it. This gap does not justify handling or extracting an existing Kilo
+client credential.
 
 ### Model catalog
 
@@ -145,6 +152,23 @@ model improvement. Do not send personal, confidential, or repository-secret
 content through anonymous/free routing. Normal API keys, organization IDs, and
 BYOK keys must remain secrets and must not be logged.
 
+## Deterministic wiring evidence
+
+`internal/api/kilo_gateway_compat_test.go` exercises the configured
+`openai-compatibility` path through CLIProxyAPI's proxy handlers and real generic
+executor against an in-process Kilo-shaped mock. It verifies:
+
+- the configured prefixed model appears through `GET /v1/models`;
+- the generic executor targets `/api/gateway/chat/completions` and forwards its
+  configured Bearer value;
+- the public model alias is rewritten to the configured upstream model;
+- non-streaming chat content and streaming SSE content plus `[DONE]` return
+  through `POST /v1/chat/completions`.
+
+This is protocol and configuration **wiring evidence only**. The mock is not the
+Kilo service, its sentinel Bearer value is not a Kilo credential, and this test
+does not satisfy the outstanding live authenticated-request criterion.
+
 ## Reproducible evidence
 
 Primary documentation, pinned to the evaluated official commit:
@@ -181,7 +205,8 @@ curl -sS -N https://api.kilo.ai/api/gateway/chat/completions \
 | Distinguish client support from provider support | Done above; the client is multi-provider, while Gateway is Kilo's distinct hosted upstream. |
 | Verify distinct service/auth/catalog/protocol | Confirmed from pinned official docs/source and live endpoints. |
 | Assess device/auth, token lifetime, streaming, tools, and limits | Documented above, including what is and is not a stable external contract. |
-| Minimal authenticated request | Paid-account request not run because no secret was available; Bearer behavior and rejection boundary verified. Dashboard API-key configuration is the supported path. |
-| Minimal streaming request | Passed live against an anonymous free model, including final usage and `[DONE]`. |
+| Minimal authenticated request | **Not met.** No request authenticated with a valid dashboard-issued Kilo API key was performed. The invalid/missing-key rejection probe and deterministic mock Bearer-forwarding fixture are not live-auth evidence. |
+| Deterministic generic-proxy wiring | Passed through the real proxy handlers and OpenAI-compatible executor for model listing, Bearer forwarding, alias rewrite, non-streaming chat, and SSE. This is wiring evidence only. |
+| Minimal streaming request | Passed live against an anonymous free model, including final usage and `[DONE]`; this does not satisfy the separate valid-key authentication requirement. |
 | Security and unsupported capabilities | Explicit above: no token extraction, opaque API keys, free-route data warning, no FIM claim, and no static-org-token refresh. |
 | No speculative implementation | Satisfied. Existing OpenAI compatibility is sufficient, so no provider code was added. |
