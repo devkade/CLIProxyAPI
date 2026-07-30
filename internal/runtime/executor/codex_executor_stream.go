@@ -134,14 +134,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		reader := bufio.NewReader(httpResp.Body)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		for scanner.Scan() {
-			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+		var readErr error
+		for {
+			line, nextErr := readCodexSSELine(reader)
+			readErr = nextErr
+			if len(line) == 0 && readErr != nil {
+				break
+			}
+			line = applyCodexIdentityConfuseResponsePayload(line, identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			terminalSuccess := false
@@ -199,11 +204,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if readErr != nil && readErr != io.EOF {
 			if ctx.Err() != nil {
 				return
 			}
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
@@ -214,4 +219,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func readCodexSSELine(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadBytes('\n')
+	if len(line) > 0 {
+		return line, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
